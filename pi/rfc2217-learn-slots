@@ -75,79 +75,134 @@ def extract_usb_prefix(id_path, top_level=False):
     return usb_slots.top_level(path) if top_level else path
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
-    ap.add_argument("--top-level", action="store_true",
-                    help="one slot per Pi port, merging everything behind a hub "
-                         "(only for boards with an onboard hub, no external hub)")
-    args = ap.parse_args()
+def hub_siblings(prefix):
+    """The other ports of the hub *prefix* hangs on, that hold no hub.
 
-    print(f"Raspberry Pi model: {pi_model()}\n")
+    Empty ports become slots too, so a board plugged in later lands in a slot
+    of its own. Ports with a hub on them are not slots: their ports are.
+    """
+    bus, _, ports = prefix.partition(":")
+    parts = ports.split(".")
+    if len(parts) < 2:
+        return []
+    parent = f"{int(bus) + 1}-{'.'.join(parts[:-1])}"
+    base = f"/sys/bus/usb/devices/{parent}"
+    try:
+        with open(f"{base}/maxchild") as f:
+            n = int(f.read().strip())
+    except (OSError, ValueError):
+        return []
+    out = []
+    for k in range(1, n + 1):
+        child = f"{base}.{k}"
+        try:
+            with open(f"{child}/bDeviceClass") as f:
+                if f.read().strip() == "09":
+                    continue
+        except OSError:
+            pass  # empty port
+        out.append(f"{bus}:{'.'.join(parts[:-1])}.{k}")
+    return out
 
+
+def discover(top_level=False, include_empty=False, quiet=False):
+    """One {"usb_prefix", "serial"} per occupied port (and per empty sibling
+    port with include_empty), plus the per-device report unless quiet."""
+    say = (lambda *a: None) if quiet else print
     devices = find_serial_devices()
-    if not devices:
-        print("No serial devices found (ttyACM* or ttyUSB*).")
-        print("Plug at least one device into a USB port and try again.")
-        sys.exit(1)
-
-    print(f"Found {len(devices)} serial device(s):\n")
-
-    slots = []
-    seen_prefixes = {}
+    seen = {}
     for devnode in devices:
         props = get_udev_info(devnode)
         if not props:
-            print(f"  {devnode}: could not read udev info")
+            say(f"  {devnode}: could not read udev info")
             continue
         id_path = props.get("ID_PATH", "")
         model = props.get("ID_MODEL", "Unknown")
         serial = props.get("ID_SERIAL_SHORT") or props.get("ID_SERIAL", "?")
-        prefix = extract_usb_prefix(id_path, args.top_level)
-
-        print(f"  {devnode}")
-        print(f"     model  : {model}")
-        print(f"     serial : {serial}")
-        print(f"     id_path: {id_path}")
-        print(f"     prefix : {prefix}")
-        print()
-
+        prefix = extract_usb_prefix(id_path, top_level)
+        say(f"  {devnode}")
+        say(f"     model  : {model}")
+        say(f"     serial : {serial}")
+        say(f"     id_path: {id_path}")
+        say(f"     prefix : {prefix}")
+        say()
         if not prefix:
             continue
         # A board with two serial interfaces (two ttys) is one USB device on
         # one port, so it gives one prefix. Two *different* boards with the
         # same prefix only happen with --top-level behind a hub.
-        if prefix in seen_prefixes and seen_prefixes[prefix] != serial:
+        if prefix in seen and seen[prefix] != serial:
             print(f"  WARNING: {devnode} ({serial}) shares {prefix} with "
-                  f"{seen_prefixes[prefix]}: they would be one slot\n")
-        seen_prefixes.setdefault(prefix, serial)
+                  f"{seen[prefix]}: they would be one slot\n", file=sys.stderr)
+        seen.setdefault(prefix, serial)
+    if include_empty and not top_level:
+        for prefix in list(seen):
+            for sib in hub_siblings(prefix):
+                seen.setdefault(sib, "")
+    return [{"usb_prefix": p, "serial": seen[p]}
+            for p in sorted(seen, key=usb_slots.sort_key)]
 
-    # Build suggested config with slots numbered in the order they were discovered
-    for i, prefix in enumerate(sorted(seen_prefixes, key=usb_slots.sort_key), start=1):
-        slots.append({
-            "label": f"SLOT{i}",
-            "usb_prefix": prefix,
-            "tcp_port": 4000 + i,
-            "gdb_port": 3332 + i,
-            "openocd_telnet_port": 4443 + i,
-        })
 
-    if not slots:
-        print("No usable slots discovered.")
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
+    ap.add_argument("--top-level", action="store_true",
+                    help="one slot per Pi port, merging everything behind a hub "
+                         "(only for boards with an onboard hub, no external hub)")
+    ap.add_argument("--include-empty", action="store_true",
+                    help="also make slots of the empty ports on the hubs the "
+                         "boards are plugged into")
+    ap.add_argument("--merge", metavar="TESTBENCH_JSON",
+                    help="fold the ports into this existing config, keeping its "
+                         "labels, TCP/GDB ports, GPIO pins and debug probes")
+    ap.add_argument("--pin", action="append", default=[], metavar="LABEL=SERIAL",
+                    help="put LABEL on the port of the board with this USB serial "
+                         "(an ESP32-S3's is its MAC), e.g. SLOT1=48:27:E2:EA:48:3C")
+    ap.add_argument("--json", action="store_true",
+                    help="print only the resulting config (for scripts)")
+    args = ap.parse_args()
+
+    pins = {}
+    for item in args.pin:
+        label, sep, serial = item.partition("=")
+        if not sep or not label or not serial:
+            ap.error(f"--pin wants LABEL=SERIAL, got {item!r}")
+        pins[label] = serial
+
+    if not args.json:
+        print(f"Raspberry Pi model: {pi_model()}\n")
+        print(f"Found {len(find_serial_devices())} serial device(s):\n")
+    learned = discover(args.top_level, args.include_empty, quiet=args.json)
+    if not learned:
+        print("No serial devices found (ttyACM* or ttyUSB*). Plug at least one "
+              "device into a USB port and try again.", file=sys.stderr)
         sys.exit(1)
 
-    config = {
-        "gpio_boot": 18,
-        "gpio_en": 17,
-        "slots": slots,
-        "debug_probes": [],
-    }
+    existing = None
+    if args.merge:
+        try:
+            with open(args.merge) as f:
+                existing = json.load(f)
+        except FileNotFoundError:
+            existing = None
+        except (OSError, ValueError) as exc:
+            print(f"cannot read {args.merge}: {exc}", file=sys.stderr)
+            sys.exit(1)
 
+    config, notes = usb_slots.merge_config(existing, learned, pins)
+    if args.json:
+        for n in notes:
+            print(f"note: {n}", file=sys.stderr)
+        print(json.dumps(config, indent=2))
+        return
+
+    for n in notes:
+        print(f"  {n}")
     print("=" * 60)
     print("Suggested /etc/rfc2217/testbench.json:")
     print("=" * 60)
     print(json.dumps(config, indent=2))
     print()
-    print("To install:")
+    print("To install (or run update-bench.sh, which does all of this):")
     print("  sudo cp <paste-to-file>.json /etc/rfc2217/testbench.json")
     print("  sudo systemctl restart rfc2217-portal")
 
