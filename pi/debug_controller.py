@@ -73,6 +73,24 @@ def _usb_location(usb_prefix: str | None) -> str | None:
         return None
 
 
+def jtag_location(usb_devices: list[dict] | None,
+                  usb_prefix: str | None) -> str | None:
+    """The OpenOCD location of the slot's built-in JTAG device.
+
+    The board's own sysfs path when the slot's scan found exactly one
+    Espressif JTAG device: with an external hub on the slot's port the board
+    sits a hop or more below the prefix ("1-1.1.3", not "1-1.1"), and OpenOCD
+    given the prefix finds no device there ("could not find or open device").
+    Otherwise the prefix, as before.
+    """
+    paths = {d.get("usb_path") for d in (usb_devices or [])
+             if d.get("vid_pid", "").split(":")[0] == _ESPRESSIF_VID
+             and "JTAG" in d.get("product", "") and d.get("usb_path")}
+    if len(paths) == 1:
+        return paths.pop()
+    return _usb_location(usb_prefix)
+
+
 def tcl_port_for(gdb_port: int) -> int:
     """The TCL port belonging to a slot's GDB port.
 
@@ -106,7 +124,8 @@ def _tap_id_in(output: str) -> str | None:
 
 
 def detect_chip(probe: dict | None = None,
-                usb_prefix: str | None = None) -> str | None:
+                usb_prefix: str | None = None,
+                usb_devices: list[dict] | None = None) -> str | None:
     """Auto-detect chip type by trying OpenOCD configs until one succeeds.
 
     Tries each config in sequence. OpenOCD fails fast (~1-2s) on TAP
@@ -116,6 +135,8 @@ def detect_chip(probe: dict | None = None,
         probe: Probe config dict (for ESP-Prog mode). None for USB JTAG.
         usb_prefix: The asking slot's ``_usb_prefix``. Without it a
             built-in-JTAG detection may examine another slot's board.
+        usb_devices: The slot's ``_usb_devices``; when they name the board's
+            JTAG device, its own USB path is used (see ``jtag_location``).
 
     Returns:
         Chip name (e.g. "esp32c3") or None if no chip detected.
@@ -125,7 +146,7 @@ def detect_chip(probe: dict | None = None,
     else:
         configs = BUILTIN_DETECT_ORDER
 
-    location = _usb_location(usb_prefix)
+    location = jtag_location(usb_devices, usb_prefix)
     gdb_p, telnet_p, tcl_p = _DETECT_PORTS
 
     for chip in configs:
@@ -239,7 +260,8 @@ def detect_slot_jtag(
 
     # 1. Built-in USB JTAG on this slot?
     if _slot_has_builtin_jtag(usb_devices):
-        chip = detect_chip(probe=None, usb_prefix=usb_prefix)
+        chip = detect_chip(probe=None, usb_prefix=usb_prefix,
+                           usb_devices=usb_devices)
         if chip:
             print(f"[debug] {slot_label}: built-in JTAG → {chip}",
                   flush=True)
@@ -371,7 +393,8 @@ def start(slot_label: str, slot: dict, gdb_port: int, telnet_port: int,
             # will run, or it examines a neighbour — and finds nothing when
             # that neighbour is already held by its own session.
             chip = detect_chip(probe_info,
-                               usb_prefix=slot.get("_usb_prefix"))
+                               usb_prefix=slot.get("_usb_prefix"),
+                               usb_devices=slot.get("_usb_devices"))
             if not chip:
                 return {"ok": False,
                         "error": "could not auto-detect chip type — "
@@ -411,7 +434,8 @@ def start(slot_label: str, slot: dict, gdb_port: int, telnet_port: int,
                 return {"ok": False,
                         "error": f"chip '{chip}' has no USB JTAG — "
                                  f"supported: {supported}"}
-            location = _usb_location(slot.get("_usb_prefix"))
+            location = jtag_location(slot.get("_usb_devices"),
+                                     slot.get("_usb_prefix"))
             if location:
                 cmd += ["-c", f"adapter usb location {location}"]
             cmd += ["-f", BUILTIN_CONFIGS[chip]]

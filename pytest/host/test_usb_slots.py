@@ -75,3 +75,28 @@ def test_learn_slots_keeps_the_hub_port_by_default():
     ls = _learn_slots()
     assert ls.extract_usb_prefix(PI4 + "0:1.1.3:1.0") == "0:1.1.3"
     assert ls.extract_usb_prefix(PI4 + "0:1.1.3:1.0", top_level=True) == "0:1.1"
+
+
+# ── OpenOCD must name the board, not the hub port ────────────────────────
+
+def _dc():
+    import debug_controller
+    return debug_controller
+
+
+JTAG = {"product": "USB JTAG/serial debug unit", "vid_pid": "303a:1001"}
+
+
+def test_jtag_location_names_the_board_behind_a_hub():
+    devs = [dict(JTAG, usb_path="1-1.1.3")]
+    assert _dc().jtag_location(devs, "0:1.1") == "1-1.1.3"
+
+
+def test_jtag_location_falls_back_to_the_prefix():
+    dc = _dc()
+    assert dc.jtag_location([], "0:1.2") == "1-1.2"
+    assert dc.jtag_location([dict(JTAG)], "0:1.2") == "1-1.2"   # old scan, no path
+    two = [dict(JTAG, usb_path="1-1.1.2"), dict(JTAG, usb_path="1-1.1.3")]
+    assert dc.jtag_location(two, "0:1.1") == "1-1.1"            # ambiguous
+    other = [{"product": "CP2102", "vid_pid": "10c4:ea60", "usb_path": "1-1.1.2"}]
+    assert dc.jtag_location(other, "0:1.1") == "1-1.1"
