@@ -218,7 +218,7 @@ Then edit `/etc/rfc2217/testbench.json`:
 |-------|-------------|
 | `gpio_boot` / `gpio_en` | Pi BCM GPIO wired to DUT BOOT (GPIO0/GPIO9) and EN/RST. Omit if not wired. |
 | `slots[].label` | Slot name shown in the UI |
-| `slots[].usb_prefix` | USB path prefix, e.g. `"0:1.1"`. Auto-detected if omitted. |
+| `slots[].usb_prefix` | Port path of the slot's USB port, e.g. `"0:1.2"` (a Pi port) or `"0:1.1.2"` (port 2 of a hub on Pi port 1). `rfc2217-learn-slots` prints one per occupied port. Auto-detected if omitted. |
 | `slots[].tcp_port` / `gdb_port` / `openocd_telnet_port` | Default to `4000+i` / `3332+i` / `4443+i` |
 | `debug_probes[]` | ESP-Prog / FT2232H probe definitions. Omit if using USB JTAG only. |
 

@@ -5,13 +5,24 @@ rfc2217-learn-slots — Discover USB-port-to-slot mapping on any Raspberry Pi.
 Works on Pi Zero 2 W, Pi 3, Pi 4, Pi 5, or anything else.  Plug a device
 into each USB port you want to use as a slot, then run this tool.  It
 prints a ready-to-paste ``testbench.json`` with one slot per detected
-USB hub port, each with a unique TCP and GDB port.
+USB port, each with a unique TCP and GDB port.
+
+Each slot is the port the board itself is plugged into, so every port of an
+external hub (including hubs built from cascaded internal hubs) is its own
+slot. Pass --top-level for the old one-slot-per-Pi-port behaviour.
 """
 
+import argparse
 import glob
 import json
+import os
 import subprocess
 import sys
+
+# usb_slots.py is installed next to this script (/usr/local/bin) and sits next
+# to it in the repo (pi/), so the script's own directory finds it either way.
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import usb_slots  # noqa: E402
 
 
 def get_udev_info(devnode):
@@ -44,27 +55,33 @@ def pi_model():
         return "Unknown"
 
 
-def extract_usb_prefix(id_path):
-    """Reduce an ID_PATH to the stable hub-port prefix used by usb_prefix.
+def extract_usb_prefix(id_path, top_level=False):
+    """Reduce an ID_PATH to the port path used as a slot's usb_prefix.
 
-    Examples:
-      platform-3f980000.usb-usb-0:1.1:1.0     -> 0:1.1  (Pi Zero 2 W, port 1)
-      platform-3f980000.usb-usb-0:1.3.4:1.0   -> 0:1.3  (device behind sub-hub on port 3)
-      pci-0000:01:00.0-usb-0:2.1:1.0          -> 0:2.1  (Pi 4/5 USB3)
+    The prefix is the port the device itself is plugged into, so each port of
+    an external hub becomes its own slot:
+      platform-3f980000.usb-usb-0:1.1:1.0     -> 0:1.1    (Pi port, no hub)
+      platform-3f980000.usb-usb-0:1.3.4:1.0   -> 0:1.3.4  (hub on Pi port 3, hub port 4)
+      pci-0000:01:00.0-usb-0:1.2.1.3:1.2      -> 0:1.2.1.3 (hub with an internal second hub)
+
+    With top_level=True it keeps only the Pi-side port ("0:1.3.4" -> "0:1.3"),
+    for a bench whose boards carry their own onboard hub and plug straight
+    into the Pi. Behind an external hub that collapses every board into one
+    slot, which is why it is no longer the default.
     """
-    idx = id_path.rfind("usb-")
-    if idx == -1:
+    path = usb_slots.port_path(id_path)
+    if path is None:
         return None
-    tail = id_path[idx + 4:]          # "0:1.3.4:1.0"
-    bus_port, _, _ = tail.partition(":1.0")  # strip the interface suffix
-    # For devices behind sub-hubs (ESP32-S3 dual-USB), keep only the top-level hub port
-    parts = bus_port.split(".")
-    if len(parts) > 2:
-        bus_port = ".".join(parts[:2])  # "0:1.3.4" -> "0:1.3"
-    return bus_port
+    return usb_slots.top_level(path) if top_level else path
 
 
 def main():
+    ap = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
+    ap.add_argument("--top-level", action="store_true",
+                    help="one slot per Pi port, merging everything behind a hub "
+                         "(only for boards with an onboard hub, no external hub)")
+    args = ap.parse_args()
+
     print(f"Raspberry Pi model: {pi_model()}\n")
 
     devices = find_serial_devices()
@@ -85,7 +102,7 @@ def main():
         id_path = props.get("ID_PATH", "")
         model = props.get("ID_MODEL", "Unknown")
         serial = props.get("ID_SERIAL_SHORT") or props.get("ID_SERIAL", "?")
-        prefix = extract_usb_prefix(id_path)
+        prefix = extract_usb_prefix(id_path, args.top_level)
 
         print(f"  {devnode}")
         print(f"     model  : {model}")
@@ -96,13 +113,16 @@ def main():
 
         if not prefix:
             continue
-        # Deduplicate — dual-USB boards show up twice on the same hub port
-        if prefix in seen_prefixes:
-            continue
-        seen_prefixes[prefix] = True
+        # A board with two serial interfaces (two ttys) is one USB device on
+        # one port, so it gives one prefix. Two *different* boards with the
+        # same prefix only happen with --top-level behind a hub.
+        if prefix in seen_prefixes and seen_prefixes[prefix] != serial:
+            print(f"  WARNING: {devnode} ({serial}) shares {prefix} with "
+                  f"{seen_prefixes[prefix]}: they would be one slot\n")
+        seen_prefixes.setdefault(prefix, serial)
 
     # Build suggested config with slots numbered in the order they were discovered
-    for i, prefix in enumerate(sorted(seen_prefixes.keys()), start=1):
+    for i, prefix in enumerate(sorted(seen_prefixes, key=usb_slots.sort_key), start=1):
         slots.append({
             "label": f"SLOT{i}",
             "usb_prefix": prefix,
