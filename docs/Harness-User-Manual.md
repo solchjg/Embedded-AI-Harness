@@ -173,6 +173,22 @@ To update the scripts later without touching system packages or config:
 sudo bash install.sh --update
 ```
 
+To update and re-map the slots in one go (after merging harness changes, or
+after changing a hub or cable), run `update-bench.sh` from the clone:
+
+```bash
+sudo bash pi/update-bench.sh --pin SLOT1=48:27:E2:EA:48:3C
+```
+
+It refuses while a slot is in a debug session, pulls, runs
+`install.sh --update`, runs `rfc2217-learn-slots --merge` against the current
+`/etc/rfc2217/testbench.json` (keeping labels, TCP/GDB ports, GPIO pins and
+debug probes; giving every port of each hub a slot, empty ones too), shows the
+diff and asks, keeps the old file as `testbench.json.<time>.bak`, restarts the
+portal and prints each slot's port, device and chip. `--pin LABEL=SERIAL` keeps
+a slot on one board wherever it is plugged (an ESP32-S3's USB serial is its
+MAC); `--no-learn` updates the code only; `--help` lists the rest.
+
 ### 2.4 Verify
 
 ```bash

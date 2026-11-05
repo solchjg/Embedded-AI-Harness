@@ -52,6 +52,11 @@ def prefix_owns(prefix: str, slot_key: str) -> bool:
     path = port_path(slot_key)
     if path is None:
         return False
+    return path_owns(prefix, path)
+
+
+def path_owns(prefix: str, path: str) -> bool:
+    """True when port path *path* is *prefix* or lies below it."""
     return path == prefix or path.startswith(prefix + ".")
 
 
@@ -104,3 +109,114 @@ def sort_key(prefix: str):
         return (1, prefix)
     bus, _, ports = prefix.partition(":")
     return (0, [int(bus)] + [int(p) for p in ports.split(".")])
+
+
+# ── Merging learned ports into an existing testbench.json ────────────────
+
+def _label_num(label: str) -> int | None:
+    m = re.fullmatch(r"SLOT(\d+)", label or "")
+    return int(m.group(1)) if m else None
+
+
+def merge_config(existing: dict | None, learned: list[dict],
+                 pins: dict[str, str] | None = None) -> tuple[dict, list[str]]:
+    """Fold freshly learned ports into an existing testbench.json.
+
+    *learned* is one {"usb_prefix", "serial"} per occupied port. *pins* maps a
+    slot label to a USB serial (an ESP32-S3's is its MAC): that label moves to
+    whichever port the board with that serial is on now.
+
+    Kept from *existing*: gpio pins, debug probes, every slot's label and TCP,
+    GDB and telnet ports, and slots whose port is still valid (an empty port
+    stays a slot). Dropped: a slot whose prefix now has a hub on it, i.e. a
+    learned port lies below it, since it would take every board on that hub.
+    New ports get the next free SLOTn and the ports that number implies, or
+    the next unused ones.
+
+    Returns (config, notes): notes say, in words, what changed.
+    """
+    existing = existing or {}
+    pins = {k: v.lower() for k, v in (pins or {}).items()}
+    notes: list[str] = []
+    cfg = {k: v for k, v in existing.items() if k != "slots"}
+    cfg.setdefault("gpio_boot", 18)
+    cfg.setdefault("gpio_en", 17)
+    cfg.setdefault("debug_probes", [])
+
+    prefixes = [entry["usb_prefix"] for entry in learned]
+    serial_at = {entry["usb_prefix"]: (entry.get("serial") or "").lower()
+                 for entry in learned}
+
+    slots_out: list[dict] = []
+    for s in existing.get("slots", []):
+        s = dict(s)
+        p = s.get("usb_prefix")
+        below = [q for q in prefixes
+                 if is_port_path(p) and q != p and path_owns(p, q)]
+        if below:
+            notes.append(f"{s['label']}: dropped {p}, a hub sits there now "
+                         f"(ports {', '.join(sorted(below, key=sort_key))})")
+            s["usb_prefix"] = None
+        slots_out.append(s)
+
+    for label, serial in pins.items():
+        port = next((p for p in prefixes if serial_at.get(p) == serial), None)
+        if port is None:
+            notes.append(f"{label}: pinned board {serial} not found, left as is")
+            continue
+        for s in slots_out:
+            if s.get("usb_prefix") == port and s["label"] != label:
+                notes.append(f"{s['label']}: gave {port} to {label}")
+                s["usb_prefix"] = None
+        target = next((s for s in slots_out if s["label"] == label), None)
+        if target is None:
+            target = {"label": label}
+            slots_out.append(target)
+        if target.get("usb_prefix") != port:
+            notes.append(f"{label}: now {port} (board {serial})")
+        target["usb_prefix"] = port
+
+    # A slot that lost its port and is not pinned is reused for a new port
+    # before a new label is made, so SLOT numbers stay compact.
+    taken = {s.get("usb_prefix") for s in slots_out}
+    free = [s for s in slots_out if not s.get("usb_prefix")]
+    for p in sorted(prefixes, key=sort_key):
+        if p in taken:
+            continue
+        if free:
+            s = free.pop(0)
+            notes.append(f"{s['label']}: now {p}")
+        else:
+            used = {_label_num(s["label"]) for s in slots_out}
+            n = 1
+            while n in used:
+                n += 1
+            s = {"label": f"SLOT{n}"}
+            slots_out.append(s)
+            notes.append(f"{s['label']}: new, {p}")
+        s["usb_prefix"] = p
+        taken.add(p)
+    for s in free:
+        notes.append(f"{s['label']}: removed, no port left for it")
+    slots_out = [s for s in slots_out if s.get("usb_prefix")]
+
+    for key, base in (("tcp_port", 4000), ("gdb_port", 3332),
+                      ("openocd_telnet_port", 4443)):
+        used = {s[key] for s in slots_out if s.get(key)}
+        for s in slots_out:
+            if s.get(key):
+                continue
+            n = _label_num(s["label"]) or 1
+            port = base + n
+            while port in used:
+                port += 1
+            s[key] = port
+            used.add(port)
+
+    slots_out.sort(key=lambda s: (_label_num(s["label"]) is None,
+                                  _label_num(s["label"]) or 0, s["label"]))
+    order = ("label", "usb_prefix", "tcp_port", "gdb_port", "openocd_telnet_port")
+    cfg["slots"] = [{k: s[k] for k in order if k in s}
+                    | {k: v for k, v in s.items() if k not in order}
+                    for s in slots_out]
+    return cfg, notes
