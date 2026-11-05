@@ -431,8 +431,8 @@ jack count, and add any unoccupied prefix(es) to the table.
       "debug_chip": null,
       "debug_gdb_port": null,
       "usb_devices": [
-        {"product": "USB JTAG/serial debug unit", "vid_pid": "303a:1001"},
-        {"product": "USB Single Serial", "vid_pid": "1a86:55d3"}
+        {"product": "USB JTAG/serial debug unit", "vid_pid": "303a:1001", "usb_path": "1-1.1"},
+        {"product": "USB Single Serial", "vid_pid": "1a86:55d3", "usb_path": "1-1.1.2"}
       ]
     }
   ],
@@ -2969,7 +2969,11 @@ matching device libusb offers first — so a detection asked on behalf of one
 slot may examine, and report the chip of, a board in a different socket, and
 may seize a board another session is already driving. The slot's USB port path
 is the only stable name for "the board in this socket", and is passed as
-`adapter usb location`.
+`adapter usb location`. The location is the board's own USB path — the one
+Espressif JTAG device in the slot's `usb_devices` — and falls back to the
+slot's `usb_prefix` only when there is not exactly one: with an external hub on
+the slot's port the board sits below the prefix, and OpenOCD given the hub's
+port finds no device.
 
 **Port allocation.** OpenOCD listens on three ports — GDB, telnet and TCL. A
 slot that is assigned only the first two leaves the third at its default, and

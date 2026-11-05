@@ -1244,7 +1244,11 @@ def _scan_usb_devices(slot: dict) -> list[dict]:
             # Skip hubs
             if "hub" in product.lower():
                 continue
-            devices.append({"product": product, "vid_pid": f"{vid}:{pid}"})
+            # usb_path is the board's own sysfs name ("1-1.1.3"). Behind a
+            # hub it differs from the slot's prefix, and OpenOCD's
+            # "adapter usb location" must name the board, not the hub port.
+            devices.append({"product": product, "vid_pid": f"{vid}:{pid}",
+                            "usb_path": name})
         except OSError:
             continue
     return devices
