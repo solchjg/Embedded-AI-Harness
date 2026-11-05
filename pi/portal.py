@@ -31,6 +31,7 @@ import gpiod
 import mqtt_controller
 import netscan_controller
 import tls_mirror_controller
+import usb_slots
 import wifi_controller
 try:
     import ble_controller
@@ -499,6 +500,15 @@ def _detect_usb_hub_ports() -> list[str]:
             continue
         if nports <= 0:
             continue
+        # A USB 3 hub shows up twice: a USB 2 hub and a SuperSpeed hub with
+        # the same jacks. ESP boards are USB 2 devices and always enumerate on
+        # the USB 2 side, so the SuperSpeed twin would only add empty slots.
+        try:
+            with open(os.path.join(dev_path, "speed")) as f:
+                if int(f.read().strip()) >= 5000:
+                    continue
+        except (OSError, ValueError):
+            pass
         # Derive the bus:port prefix from the hub's own devpath, e.g. "1-1" -> "0:1"
         bus_dash_port = name
         try:
@@ -512,7 +522,7 @@ def _detect_usb_hub_ports() -> list[str]:
                 continue
             if _port_is_serial_usable(dev_path, p):
                 ports.add(prefix)
-    return sorted(ports)
+    return sorted(ports, key=usb_slots.sort_key)
 
 
 def _autogenerate_config() -> dict:
@@ -610,20 +620,36 @@ def load_config(path: str) -> dict[str, dict]:
 def _find_fixed_slot_for_key(slot_key: str) -> dict | None:
     """Match a USB slot_key against configured prefix patterns.
 
-    Returns the fixed slot dict whose prefix matches, or None.
-    Longer prefixes checked first. The fixed slot always stays in the
-    dict under its placeholder key — multiple slot_keys can map to it.
+    Returns the fixed slot dict whose prefix owns the device's port path, or
+    None. A prefix owns its port and the ports below it in whole hops
+    (`usb_slots.prefix_owns`): "0:1.1" owns "0:1.1.3" but not "0:1.10". The
+    longest owner wins. The fixed slot always stays in the dict under its
+    placeholder key — multiple slot_keys can map to it.
+
+    A device that reaches its slot through a hub is logged once per port:
+    with an external hub on a slot's port, every board on that hub would
+    otherwise land silently in that one slot.
     """
-    candidates = sorted(_global_config.get("slot_prefixes", []),
-                        key=lambda sp: len(sp.get("prefix", "")),
-                        reverse=True)
-    for sp in candidates:
-        prefix = sp.get("prefix")
-        if prefix and prefix in slot_key:
-            pk = sp["placeholder_key"]
-            if pk in slots:
-                return slots[pk]
-    return None
+    by_prefix = {sp.get("prefix"): sp
+                 for sp in _global_config.get("slot_prefixes", [])
+                 if sp.get("prefix")}
+    prefix = usb_slots.best_prefix(by_prefix, slot_key)
+    if prefix is None:
+        return None
+    sp = by_prefix[prefix]
+    hops = usb_slots.hops_below(prefix, slot_key)
+    if hops:
+        path = usb_slots.port_path(slot_key)
+        warned = _global_config.setdefault("_hub_warned", set())
+        if path not in warned:
+            warned.add(path)
+            print(f"[portal] WARNING: device on port {path} joins {sp['label']} "
+                  f"(usb_prefix {prefix}) through {hops} hub hop(s). If an "
+                  f"external hub is on that port, every board on it shares "
+                  f"{sp['label']}: give each hub port its own usb_prefix "
+                  f"(run rfc2217-learn-slots).", flush=True)
+    pk = sp["placeholder_key"]
+    return slots.get(pk)
 
 
 def _next_available_port(base: int, used_attr: str) -> int:
@@ -1193,19 +1219,18 @@ def _scan_usb_devices(slot: dict) -> list[dict]:
     prefix = slot.get("_usb_prefix")
     if not prefix:
         return []
-    # Convert slot prefix "0:1.1" → sysfs glob "1-1.1*"
-    # prefix format: "0:1.X" or "0:1.X.Y"
-    parts = prefix.split(":")  # ["0", "1.1"]
-    if len(parts) != 2:
+    # Slot prefix "0:1.1" → sysfs "1-1.1" and the devices below it ("1-1.1.3"),
+    # in whole hops: "1-1.10" is another port, not part of this slot.
+    sysfs_pattern = usb_slots.sysfs_name(prefix)
+    if not sysfs_pattern:
         return []
-    sysfs_pattern = f"1-{parts[1]}"
     sysfs_base = "/sys/bus/usb/devices"
     devices = []
     import glob as _glob
     for path in sorted(_glob.glob(f"{sysfs_base}/{sysfs_pattern}*")):
         name = os.path.basename(path)
         # Skip interface entries (contain ':')
-        if ":" in name:
+        if ":" in name or not usb_slots.sysfs_name_in(prefix, name):
             continue
         prod_file = os.path.join(path, "product")
         vid_file = os.path.join(path, "idVendor")

@@ -242,7 +242,7 @@ that disables the WiFi test service entirely (see §1.4).
 |--------|-------------|
 | **Slot** | A fixed position (`SLOT1`, `SLOT2`, ..., `SLOTn`) pre-created at boot. The slot count `n` is determined at startup by auto-detection of the Pi's USB hub topology (one slot per usable hub port, see FR-002), or by explicit configuration in `testbench.json` if present. Each slot is mapped to a physical USB hub port by prefix match and is always visible in the UI. A slot can track multiple devnodes when a dual-USB board (e.g., ESP32-S3 with sub-hub) is connected. |
 | **slot_key** | Stable identifier for physical port topology (derived from udev `ID_PATH`). Multiple slot_keys can map to the same slot via prefix matching (e.g., `0:1.1:1.0` and `0:1.1.4:1.0` both match SLOT1's prefix `0:1.1`). |
-| **usb_prefix** | Substring of `ID_PATH` that identifies a physical hub port (configured in `testbench.json`). Longer prefixes match first, so a sub-hub port like `0:1.1.4` can be distinguished from its parent `0:1.1`. |
+| **usb_prefix** | Port path (`<bus>:<ports>`, the part of `ID_PATH` after the last `usb-`, without the interface) that identifies a physical USB port (configured in `testbench.json`). A prefix owns its port and the ports below it in whole hops (`0:1.1` owns `0:1.1.4`, never `0:1.10`); the longest owner wins, so a hub port like `0:1.1.4` is distinguished from its parent `0:1.1`. |
 | **devnode** | Current tty device path (e.g., `/dev/ttyACM0`) — may change on reconnect |
 | **proxy** | RFC2217 server process for a serial device: `plain_rfc2217_server.py` for all devices (direct DTR/RTS passthrough) |
 | **seq** (sequence) | Global monotonically increasing counter, incremented on every hotplug event |
@@ -299,9 +299,13 @@ Zero 2 W with a 4-port hub yields 3–4 slots, a Pi 3B+ yields 4, a Pi 4B
 or Pi 5 yields 4. Slots are always visible in `/api/devices` and the web
 UI, even when no devices are connected (state = `absent`).
 
-**USB prefix matching:** When a device's `slot_key` (from udev `ID_PATH`)
-contains a slot's `usb_prefix`, that device belongs to that slot. Longer
-prefixes match first. Multiple devices can map to the same slot (dual-USB
+**USB prefix matching:** A device belongs to the slot whose `usb_prefix`
+equals its port path (from udev `ID_PATH`) or is an ancestor of it in whole
+hub hops; the longest such prefix wins. A device that reaches its slot through
+a hub is logged once (`WARNING: device on port ... joins SLOTn ... through N
+hub hop(s)`): with an external hub on a slot's port, every board on that hub
+would otherwise share the one slot, so each hub port needs its own prefix. A
+prefix that is not a port path is matched as a plain substring, as before. Multiple devices can map to the same slot (dual-USB
 boards with sub-hubs). Each slot tracks all its devnodes and remains
 `present` as long as any devnode is active.
 
@@ -352,14 +356,18 @@ Configuration file: `/etc/rfc2217/testbench.json`
 }
 ```
 
-The `usb_prefix` is a substring of the udev `ID_PATH`. Discover it by
-plugging a device into each physical port and running:
-`udevadm info -q property -n /dev/ttyACMx | grep ID_PATH`
+The `usb_prefix` is the port path in the udev `ID_PATH`. Discover it by
+plugging a board into each physical port and running `sudo
+rfc2217-learn-slots`, which prints one slot per occupied port: behind an
+external hub, one per hub port (`--top-level` merges everything behind each Pi
+port instead). By hand: `udevadm info -q property -n /dev/ttyACMx | grep
+ID_PATH`.
 
 **Auto-detection (no config):** If `/etc/rfc2217/testbench.json` is absent,
 the portal auto-generates the slot list at startup by walking
-`/sys/bus/usb/devices/`, enumerating every downstream hub, and emitting one
-slot per port (`SLOT1..SLOTn` with default TCP/GDB/OpenOCD ports). Ports
+`/sys/bus/usb/devices/`, enumerating every downstream USB 2 hub (the
+SuperSpeed twin of a USB 3 hub is skipped: ESP boards enumerate on the USB 2
+side), and emitting one slot per port, in numeric port order (`SLOT1..SLOTn` with default TCP/GDB/OpenOCD ports). Ports
 bound to non-serial drivers (USB Ethernet, storage, HID) are filtered out.
 
 **Phantom-port filter:** Some Pi boards advertise more hub ports than the
