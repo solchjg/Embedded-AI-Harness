@@ -733,6 +733,10 @@ def _make_slot(slot_key: str, label: str = None, tcp_port: int = None,
         "_gpio_wiring": None,  # last BOOT/EN measurement record (FR-042)
         "_jtag_slot": None,  # slot label providing JTAG (own or probe)
         "_serial_buf": collections.deque(maxlen=SERIAL_BUF_MAXLEN),
+        # FR-045: recent (ts, action) hotplug events, so the BOOT/EN test can
+        # see a native-USB board leave the bus when EN resets it.
+        "_hotplug_log": collections.deque(maxlen=32),
+        "_gpio_testing": False,
         "_lock": threading.Lock(),
     }
 
@@ -2428,9 +2432,6 @@ def _gpio_wiring_verdict(slot: dict) -> dict:
     return slot_meta.wiring_verdict(slot.get("_gpio_wiring"), present,
                                     serial, time.time(), GPIO_WIRING_MAX_AGE_S)
 
-_ROM_BANNER = re.compile(r"ESP-ROM:|rst:0x[0-9a-fA-F]+|boot:0x[0-9a-fA-F]+")
-
-
 def _load_gpio_wiring() -> dict:
     try:
         with open(GPIO_WIRING_FILE) as fh:
@@ -2479,31 +2480,32 @@ def _save_slot_name(label: str, name: str | None) -> bool:
         return False
 
 
-def _saw_rom_banner(slot: dict, since: float, timeout: float) -> bool:
-    """Did the device print a ROM boot banner after *since*?"""
+def _wait_for_reset(slot: dict, since: float, timeout: float) -> str | None:
+    """FR-045: wait for a ROM banner or the board leaving USB after *since*."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        for entry in list(slot.get("_serial_buf") or []):
-            if entry.get("ts", 0) > since and _ROM_BANNER.search(entry.get("text", "")):
-                return True
-        time.sleep(0.3)
+        how = slot_meta.reset_evidence(since, list(slot.get("_serial_buf") or []),
+                                       list(slot.get("_hotplug_log") or []))
+        if how:
+            return how
+        time.sleep(0.2)
+    return None
+
+
+def _wait_for_return(slot: dict, since: float, timeout: float) -> bool:
+    """FR-045: wait for a board that left USB after *since* to come back."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if (slot_meta.returned_after(since, list(slot.get("_hotplug_log") or []))
+                and slot.get("devnode") and os.path.exists(slot["devnode"])):
+            return True
+        time.sleep(0.2)
     return False
 
 
-def test_gpio_wiring(slot: dict) -> dict:
-    """Drive EN and BOOT and observe whether this board is actually wired.
-
-    Returns {ok, en_wired, boot_wired, detail}. Leaves the board running.
-    """
-    label = slot["label"] or slot["slot_key"][-20:]
-    gpio_boot = slot.get("gpio_boot")
-    gpio_en = slot.get("gpio_en")
-    if gpio_boot is None and gpio_en is None:
-        return {"ok": False, "error": f"{label}: no GPIO pins configured"}
-
-    result = {"ok": True, "en_wired": False, "boot_wired": False, "detail": ""}
-
-    # ── EN: pulse it and listen for the ROM ──────────────────────────
+def _gpio_wiring_steps(slot, label, gpio_boot, gpio_en, result) -> None:
+    """The EN and BOOT measurements of test_gpio_wiring, filling *result*."""
+    # ── EN: pulse it and look for a reset ────────────────────────────
     if gpio_en is None:
         result["detail"] = "no gpio_en configured, so EN cannot be tested; "
     else:
@@ -2514,29 +2516,43 @@ def test_gpio_wiring(slot: dict) -> dict:
             time.sleep(0.15)
             _gpio_set(gpio_en, 1)
         except Exception as exc:
-            return {"ok": False, "error": f"{label}: driving EN failed: {exc}"}
-        result["en_wired"] = _saw_rom_banner(slot, since, timeout=8.0)
-        result["detail"] = (
-            "EN pulse produced a ROM boot banner; "
-            if result["en_wired"] else
-            "EN pulse produced no reset — the pin is not connected to this "
-            "board (or the board is unresponsive); ")
+            result.update(ok=False, error=f"{label}: driving EN failed: {exc}")
+            return
+        how = _wait_for_reset(slot, since, timeout=8.0)
+        result["en_wired"] = how is not None
+        if how == "usb":
+            back = _wait_for_return(slot, since, timeout=10.0)
+            result["detail"] = (
+                "EN pulse reset the board (it left USB and came back); "
+                if back else
+                "EN pulse reset the board (it left USB and has not come back); ")
+        elif how == "banner":
+            result["detail"] = "EN pulse produced a ROM boot banner; "
+        else:
+            result["detail"] = (
+                "EN pulse produced no reset (no ROM banner, and the board "
+                "stayed on USB) — the pin is not connected to this board, or "
+                "the board is unresponsive; ")
 
     # ── BOOT: only meaningful if we can reset the board ──────────────
     if result["en_wired"] and gpio_boot is not None:
         log_activity(f"gpio-test({label}): holding BOOT (GPIO{gpio_boot}) "
                      f"across a reset", "step")
-        was_running = slot.get("running")
         with slot["_lock"]:
-            if was_running:
+            if slot["running"] and slot["pid"]:
                 stop_proxy(slot)
         try:
             _gpio_set(gpio_boot, 0)
             time.sleep(0.05)
+            since = time.time()
             _gpio_set(gpio_en, 0)
             time.sleep(0.15)
             _gpio_set(gpio_en, 1)
-            time.sleep(1.5)
+            # A native-USB board comes back on a new node; a bridge board's
+            # node never left. Either way give the ROM a moment.
+            if _wait_for_reset(slot, since, timeout=2.0) == "usb":
+                _wait_for_return(slot, since, timeout=10.0)
+            time.sleep(1.0)
             ok, detail = _download_mode_reached(slot.get("devnode") or "")
             result["boot_wired"] = ok
             result["detail"] += (
@@ -2548,15 +2564,52 @@ def test_gpio_wiring(slot: dict) -> dict:
             result["detail"] += f"BOOT test failed: {exc}"
         finally:
             # Always hand the board back running, whatever we learned.
+            released = time.time()
             try:
                 _release_slot_gpio(slot)
             except Exception:
                 pass
-            if was_running:
-                with slot["_lock"]:
-                    start_proxy(slot)
+            # The release resets it once more; let a native-USB board return.
+            if _wait_for_reset(slot, released, timeout=2.0) == "usb":
+                _wait_for_return(slot, released, timeout=10.0)
     elif result["en_wired"]:
         result["detail"] += "no gpio_boot configured, so BOOT was not tested."
+
+
+def test_gpio_wiring(slot: dict) -> dict:
+    """Drive EN and BOOT and observe whether this board is actually wired.
+
+    Returns {ok, en_wired, boot_wired, detail}. Leaves the board running.
+
+    FR-045: a reset shows as a ROM banner on serial (a USB-UART bridge board)
+    or as the board leaving USB (a native-USB ESP32, whose banner goes out
+    while the host is not connected). While the test runs it owns the port:
+    a hotplug 'add' does not restart the proxy under it.
+    """
+    label = slot["label"] or slot["slot_key"][-20:]
+    gpio_boot = slot.get("gpio_boot")
+    gpio_en = slot.get("gpio_en")
+    if gpio_boot is None and gpio_en is None:
+        return {"ok": False, "error": f"{label}: no GPIO pins configured"}
+
+    result = {"ok": True, "en_wired": False, "boot_wired": False, "detail": ""}
+    slot["_gpio_testing"] = True
+    try:
+        _gpio_wiring_steps(slot, label, gpio_boot, gpio_en, result)
+    finally:
+        slot["_gpio_testing"] = False
+        # Hand the board back with its proxy on whatever node it now has.
+        if slot.get("present"):
+            if slot.get("devnode") and not os.path.exists(slot["devnode"]):
+                slot["devnode"] = next(
+                    (d for d in slot["_devnodes"].values() if os.path.exists(d)),
+                    slot["devnode"])
+            with slot["_lock"]:
+                if slot["running"] and slot["pid"]:
+                    stop_proxy(slot)
+                start_proxy(slot)
+    if not result.get("ok", True):
+        return result
 
     wired = bool(result["en_wired"] and result["boot_wired"])
     now = time.time()
@@ -3150,6 +3203,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         slot["seq"] = seq_counter
         slot["last_action"] = action
         slot["last_event_ts"] = datetime.now(timezone.utc).isoformat()
+        slot["_hotplug_log"].append((time.time(), action))
 
         label = slot["label"] or slot_key[-20:]
         configured = slot["tcp_port"] is not None
@@ -3187,7 +3241,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         # -- Flap detection --
         now = time.time()
-        slot["_event_times"].append(now)
+        # FR-045: the resets the BOOT/EN test causes are not flapping.
+        if not slot.get("_gpio_testing"):
+            slot["_event_times"].append(now)
         # Prune events older than window
         slot["_event_times"] = [t for t in slot["_event_times"] if now - t < FLAP_WINDOW_S]
 
@@ -3253,6 +3309,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     with lk:
                         if s["flapping"] or s["_recovering"]:
                             return  # Recovery in progress
+                        if s.get("_gpio_testing"):
+                            return  # FR-045: the wiring test owns the port
                         # If proxy is already running on a different devnode,
                         # don't restart — this hotplug is for the JTAG interface
                         # which doesn't need a proxy.
