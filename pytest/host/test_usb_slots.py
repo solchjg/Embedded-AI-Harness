@@ -136,6 +136,16 @@ def test_merge_pins_a_board_and_keeps_its_ports():
     assert any("hub sits there" in n for n in notes)
 
 
+def test_merge_keeps_a_slots_own_boot_en_pins():
+    # FR-044: per-slot pins are wiring, not topology; re-learning keeps them.
+    old = dict(OLD, slots=[dict(OLD["slots"][0], gpio_boot=23, gpio_en=22),
+                           OLD["slots"][1]])
+    cfg, _ = us.merge_config(old, HUB, {"SLOT1": TDISPLAY.lower()})
+    got = _by_label(cfg)
+    assert (got["SLOT1"]["gpio_boot"], got["SLOT1"]["gpio_en"]) == (23, 22)
+    assert "gpio_boot" not in got["SLOT2"]
+
+
 def test_merge_never_keeps_a_prefix_that_now_holds_a_hub():
     cfg, _ = us.merge_config(OLD, HUB)
     assert "0:1.1" not in {s["usb_prefix"] for s in cfg["slots"]}

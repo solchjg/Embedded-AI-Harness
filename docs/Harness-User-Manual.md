@@ -232,7 +232,8 @@ Then edit `/etc/rfc2217/testbench.json`:
 
 | Field | Description |
 |-------|-------------|
-| `gpio_boot` / `gpio_en` | Pi BCM GPIO wired to DUT BOOT (GPIO0/GPIO9) and EN/RST. Omit if not wired. |
+| `gpio_boot` / `gpio_en` | Pi BCM GPIO wired to DUT BOOT (GPIO0/GPIO9) and EN/RST, for every slot that names no pins of its own. Omit or `null` if not wired. |
+| `slots[].gpio_boot` / `gpio_en` | This slot's own BOOT/EN pins (BCM 16 – 27), so two boards can be wired at once. `null` means no wire on that line. A pin a slot names is never driven for another slot. |
 | `slots[].label` | Slot name shown in the UI |
 | `slots[].usb_prefix` | Port path of the slot's USB port, e.g. `"0:1.2"` (a Pi port) or `"0:1.1.2"` (port 2 of a hub on Pi port 1). `rfc2217-learn-slots` prints one per occupied port. Auto-detected if omitted. |
 | `slots[].tcp_port` / `gdb_port` / `openocd_telnet_port` | Default to `4000+i` / `3332+i` / `4443+i` |
@@ -309,6 +310,28 @@ dedicated to WiFi testing. They never overlap.
 |---------------|----------|---------|
 | 17 | Hardware reset (active LOW) | EN / RST |
 | 18 | Boot mode select (active LOW) | GPIO0 (ESP32) / GPIO9 (C3) |
+
+The bench-wide pair goes to every slot that names no pins of its own, so it
+suits one wired board. To wire several, give each wired slot its own pair in
+`testbench.json`, e.g.:
+
+```json
+{"label": "SLOT1", "usb_prefix": "0:1.1", "gpio_en": 22, "gpio_boot": 23, ...},
+{"label": "SLOT3", "usb_prefix": "0:1.4", "gpio_en": 17, "gpio_boot": 18, ...}
+```
+
+| Pair | EN (BCM / header pin) | BOOT (BCM / header pin) | Nearby GND pin |
+|------|-----------------------|-------------------------|----------------|
+| 1 | 17 / 11 | 18 / 12 | 9, 14 |
+| 2 | 22 / 15 | 23 / 16 | 14, 20 |
+| 3 | 24 / 18 | 25 / 22 | 20, 25 |
+| 4 | 26 / 37 | 27 / 13 | 39, 9 |
+
+BCM 2/3, 5/6 and 12/13 belong to the signal generator. The Pi drives these
+lines push-pull and leaves EN driven high after a reset pulse, so put a 1 kΩ
+resistor in series on each line; a DUT's reset key pressed then cannot short
+a Pi output. After `sudo systemctl restart rfc2217-portal` the portal log names
+each slot's pins, and run the BOOT/EN test on each wired slot.
 
 Without GPIO the testbench still provides serial and debug for every plugged-in
 device; GPIO only adds automated download-mode entry and flap recovery.
