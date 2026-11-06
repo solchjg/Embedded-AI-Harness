@@ -1035,7 +1035,7 @@ when the slot is not currently flapping.
 {"label": "SLOT1", "slot_key": "...", "tcp_port": 4001, "gpio_boot": 18, "gpio_en": 17}
 ```
 
-`gpio_boot` and `gpio_en` are optional per slot.  Slots without them use
+`gpio_boot` and `gpio_en` are optional per slot (FR-044).  Slots without them use
 the no-GPIO backoff path.
 
 #### 7.8 Web UI
@@ -3439,10 +3439,31 @@ the wiring test, and its warning is noise.
   the slot card shows no BOOT/EN test button and no BOOT/EN result, and
   `POST /api/serial/gpio-test` is refused with an error naming the reason.
 
+### FR-044 — BOOT/EN Pins per Slot
+
+One bench-wide BOOT/EN pair drives every slot, so a second wired board would be
+reset by a recovery or wiring test meant for the first.
+
+- A slot definition in `testbench.json` may name its own `gpio_boot` and
+  `gpio_en` (Pi BCM pins from the GPIO control allowlist, 16 – 27). A key
+  given as `null` means that line has no wire. A slot that names one key and
+  not the other has no wire on the other.
+- A slot that names neither key uses the bench-wide pin, unless a slot names
+  that pin for itself; then no other slot drives it, including slots the
+  bench makes for unconfigured ports.
+- A pin outside the allowlist, BOOT and EN on the same pin, or a pin another
+  slot already named (first in file order wins) is left unwired for that
+  slot, and the portal logs why at start.
+- Recovery, release, the wiring test (FR-042) and `GET /api/devices` use the
+  slot's own pins. `rfc2217-learn-slots` keeps them when it re-learns ports.
+
 **Verification contract**
 
 | ID | Precondition · stimulus | Expected observation | Must NOT happen | Tier |
 |---|---|---|---|---|
+| FR-044 | Bench-wide pair; slots with none, their own pair, `null`, one key, a repeated pin, a pin outside 16 – 27, BOOT = EN · resolve | Bench pair; own pair; unwired; that key only; first slot keeps it; dropped; unwired; a log line for each drop | Two slots driving one pin; the bench-wide pair driven for a slot after another slot took it | host |
+| FR-044 | A slot with its own pins in `testbench.json` · re-learn slots | The pins kept on that slot | Per-slot pins lost | host |
+| FR-044 | Two ESP32 boards wired to their own pairs · BOOT/EN test on each | Each passes; the other board's serial shows no reset | A reset on the board in the other slot | bench |
 | FR-043 | Detected chip and USB devices (ESP native, CP2102, Notecard, none) · decide | True except for a Notecard with no ESP chip | A bridge board or an unprobed native-USB ESP32 losing the test | host |
 | FR-041 | Names with padding, control characters, empty, null, too long, non-string · clean | Tidied name; empty and null clear; the last two refused | A name over 40 characters stored | host |
 | FR-041 | Set a name on a slot · restart the portal | `board_name` in `/api/devices` and on the card | The name lost on restart | bench |
@@ -4352,3 +4373,12 @@ by slot number.
   board is present, and is out of date after a week; times are US Eastern
 - FR-043: slots whose board is not an ESP32 (a Notecard, say) show no BOOT/EN
   test or result
+
+### 2026-11-06 — BOOT/EN pins per slot
+
+Asked for by the bench's operator, to work on two wired boards at once: every
+slot drove the same BCM 17/18, so a reset meant for one board reached the other.
+
+- FR-044: each slot in `testbench.json` can name its own `gpio_boot`/`gpio_en`;
+  the bench-wide pair goes only to slots that name none and is never shared
+  with a slot that took it for itself

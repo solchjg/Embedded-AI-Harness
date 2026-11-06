@@ -590,6 +590,14 @@ def load_config(path: str) -> dict[str, dict]:
             _global_config["gpio_en"] = cfg["gpio_en"]
         if cfg.get("debug_probes"):
             _global_config["debug_probes"] = cfg["debug_probes"]
+        # FR-044: a slot may have its own BOOT/EN pair; the bench-wide pair
+        # goes only to slots that name none and is never shared with a slot
+        # that took it for itself.
+        slot_pins, default_pins, pin_notes = slot_meta.slot_gpio_pins(
+            _global_config, cfg.get("slots", []), GPIO_ALLOWED)
+        _global_config.update(default_pins)
+        for note in pin_notes:
+            print(f"[portal] gpio: {note}", flush=True)
         # Fixed slot definitions — each has label, optional usb_prefix
         for sdef in cfg.get("slots", []):
             label = sdef["label"]
@@ -603,6 +611,7 @@ def load_config(path: str) -> dict[str, dict]:
                 openocd_telnet_port=sdef.get("openocd_telnet_port"),
             )
             slot["_usb_prefix"] = prefix
+            slot.update(slot_pins[label])
             # FR-041: a default name may sit in testbench.json; the one an
             # operator sets in the portal (slot-names.json) replaces it.
             try:
@@ -620,6 +629,9 @@ def load_config(path: str) -> dict[str, dict]:
         n_slots = len(cfg.get("slots", []))
         print(f"[portal] config: gpio_boot={gb}, gpio_en={ge}, "
               f"probes={probes}, fixed_slots={n_slots}", flush=True)
+        for label, p in slot_pins.items():
+            print(f"[portal] {label}: gpio_boot={p['gpio_boot']}, "
+                  f"gpio_en={p['gpio_en']}", flush=True)
     except Exception as exc:
         print(f"[portal] config parse error: {exc}", flush=True)
     return result

@@ -10,6 +10,8 @@ the JSON files and passes the records in.
 - FR-042: a BOOT/EN wiring measurement belongs to one board at one time. It is
   shown only while that board is in the slot, and is not trusted once another
   board is there or the measurement is older than its maximum age.
+- FR-044: each slot can have its own BOOT/EN pair, so two boards can be wired
+  at once without a reset of one reaching the other.
 """
 import re
 from datetime import datetime
@@ -124,3 +126,75 @@ def wiring_verdict(record: dict | None, present: bool,
         out["wired"] = wired
     out["show"] = bool(present)
     return out
+
+
+# FR-044 ───────────────────────────────────────────────────────────────────
+
+_PIN_KEYS = ("gpio_boot", "gpio_en")
+
+
+def slot_gpio_pins(bench: dict, slot_defs: list[dict],
+                   allowed: set[int] | frozenset[int]) -> tuple[dict, dict, list[str]]:
+    """FR-044: the BOOT/EN pins each slot drives, from testbench.json.
+
+    *bench* holds the bench-wide `gpio_boot`/`gpio_en`; each entry of
+    *slot_defs* may name its own. Rules:
+
+    - A slot that names a key uses it; `null` there means no wire.
+    - A slot that names neither key inherits the bench-wide pin, unless some
+      slot names that pin for itself: a pin wired to one board is never also
+      driven for another slot.
+    - A pin outside *allowed*, not an integer, BOOT and EN the same pin, or a
+      pin another slot already named (first in file order wins) is dropped
+      for that slot with a note, leaving that line unwired.
+
+    Returns (pins, default, notes): pins maps label → {"gpio_boot",
+    "gpio_en"}; default is the pair a slot not in the file (one the bench
+    makes for an unknown port) gets; notes say, in words, what was dropped.
+    """
+    notes: list[str] = []
+
+    def valid(label, key, pin):
+        if pin is None:
+            return None
+        if isinstance(pin, bool) or not isinstance(pin, int) or pin not in allowed:
+            notes.append(f"{label}: {key} {pin!r} is not an allowed Pi GPIO "
+                         f"({min(allowed)}-{max(allowed)}); left unwired")
+            return None
+        return pin
+
+    bench_pins = {k: valid("bench", k, bench.get(k)) for k in _PIN_KEYS}
+
+    # Pins slots name for themselves, first claim wins.
+    owner: dict[int, str] = {}
+    pins: dict[str, dict] = {}
+    for sdef in slot_defs:
+        label = sdef["label"]
+        if not any(k in sdef for k in _PIN_KEYS):
+            continue
+        own = {k: valid(label, k, sdef.get(k)) for k in _PIN_KEYS}
+        if own["gpio_boot"] is not None and own["gpio_boot"] == own["gpio_en"]:
+            notes.append(f"{label}: BOOT and EN are both GPIO "
+                         f"{own['gpio_boot']}; left unwired")
+            own = {k: None for k in _PIN_KEYS}
+        for k in _PIN_KEYS:
+            pin = own[k]
+            if pin is None:
+                continue
+            if pin in owner:
+                notes.append(f"{label}: {k} GPIO {pin} is already "
+                             f"{owner[pin]}'s; left unwired")
+                own[k] = None
+            else:
+                owner[pin] = label
+        pins[label] = own
+
+    default = {k: (None if bench_pins[k] in owner else bench_pins[k])
+               for k in _PIN_KEYS}
+    for k in _PIN_KEYS:
+        if bench_pins[k] is not None and default[k] is None:
+            notes.append(f"bench-wide {k} GPIO {bench_pins[k]} belongs to "
+                         f"{owner[bench_pins[k]]}; other slots do not drive it")
+    for sdef in slot_defs:
+        pins.setdefault(sdef["label"], dict(default))
+    return pins, default, notes

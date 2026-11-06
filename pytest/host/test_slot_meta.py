@@ -105,3 +105,77 @@ def test_fr042_board_without_serial_judged_by_age_only():
 ])
 def test_fr042_times_are_us_eastern(ts, want):
     assert sm.bench_time(ts).endswith(want)
+
+
+# ── FR-044 ────────────────────────────────────────────────────────────────
+
+ALLOWED = frozenset(range(16, 28))
+BENCH = {"gpio_boot": 18, "gpio_en": 17}
+
+
+def pins(slots, bench=BENCH):
+    return sm.slot_gpio_pins(bench, slots, ALLOWED)
+
+
+def test_fr044_no_slot_pins_keeps_the_bench_wide_pair():
+    got, default, notes = pins([{"label": "SLOT1"}, {"label": "SLOT3"}])
+    assert got["SLOT1"] == got["SLOT3"] == {"gpio_boot": 18, "gpio_en": 17}
+    assert default == {"gpio_boot": 18, "gpio_en": 17}
+    assert notes == []
+
+
+def test_fr044_two_slots_with_their_own_pairs():
+    got, default, notes = pins([
+        {"label": "SLOT1", "gpio_boot": 23, "gpio_en": 22},
+        {"label": "SLOT2"},
+        {"label": "SLOT3", "gpio_boot": 18, "gpio_en": 17},
+    ])
+    assert got["SLOT1"] == {"gpio_boot": 23, "gpio_en": 22}
+    assert got["SLOT3"] == {"gpio_boot": 18, "gpio_en": 17}
+    # SLOT3 took the bench-wide pair, so nobody else drives it.
+    assert got["SLOT2"] == {"gpio_boot": None, "gpio_en": None}
+    assert default == {"gpio_boot": None, "gpio_en": None}
+    assert any("belongs to SLOT3" in n for n in notes)
+
+
+def test_fr044_null_means_no_wire():
+    got, _, notes = pins([{"label": "SLOT4", "gpio_boot": None, "gpio_en": None},
+                          {"label": "SLOT1"}])
+    assert got["SLOT4"] == {"gpio_boot": None, "gpio_en": None}
+    assert got["SLOT1"] == {"gpio_boot": 18, "gpio_en": 17}
+    assert notes == []
+
+
+def test_fr044_a_slot_naming_one_key_has_no_other():
+    got, _, _ = pins([{"label": "SLOT1", "gpio_en": 22}])
+    assert got["SLOT1"] == {"gpio_boot": None, "gpio_en": 22}
+
+
+def test_fr044_a_pin_claimed_twice_stays_with_the_first_slot():
+    got, _, notes = pins([
+        {"label": "SLOT1", "gpio_boot": 23, "gpio_en": 22},
+        {"label": "SLOT2", "gpio_boot": 23, "gpio_en": 24},
+    ])
+    assert got["SLOT1"] == {"gpio_boot": 23, "gpio_en": 22}
+    assert got["SLOT2"] == {"gpio_boot": None, "gpio_en": 24}
+    assert any("SLOT2" in n and "SLOT1's" in n for n in notes)
+
+
+@pytest.mark.parametrize("bad", [5, 12, 40, "22", 22.0, True])
+def test_fr044_a_pin_outside_the_allowed_set_is_dropped(bad):
+    got, _, notes = pins([{"label": "SLOT1", "gpio_boot": bad, "gpio_en": 22}])
+    assert got["SLOT1"] == {"gpio_boot": None, "gpio_en": 22}
+    assert notes and "not an allowed" in notes[0]
+
+
+def test_fr044_boot_and_en_on_one_pin_is_refused():
+    got, _, notes = pins([{"label": "SLOT1", "gpio_boot": 22, "gpio_en": 22}])
+    assert got["SLOT1"] == {"gpio_boot": None, "gpio_en": None}
+    assert "both GPIO 22" in notes[0]
+
+
+def test_fr044_a_bench_without_wires():
+    got, default, notes = pins([{"label": "SLOT1"}],
+                               bench={"gpio_boot": None, "gpio_en": None})
+    assert got["SLOT1"] == default == {"gpio_boot": None, "gpio_en": None}
+    assert notes == []
