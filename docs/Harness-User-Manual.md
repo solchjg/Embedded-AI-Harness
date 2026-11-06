@@ -331,7 +331,13 @@ BCM 2/3, 5/6 and 12/13 belong to the signal generator. The Pi drives these
 lines push-pull and leaves EN driven high after a reset pulse, so put a 1 kΩ
 resistor in series on each line; a DUT's reset key pressed then cannot short
 a Pi output. After `sudo systemctl restart rfc2217-portal` the portal log names
-each slot's pins, and run the BOOT/EN test on each wired slot.
+each slot's pins, and run the BOOT/EN test on each wired slot. Run it with the
+board awake: a native-USB ESP32 shows the EN reset by leaving USB for a moment,
+and the test counts that only right after its pulse.
+
+To check an EN wire by hand, hold it low (`POST /api/gpio/set
+{"pin": <EN>, "value": 0}`): a native-USB board drops out of its slot while
+held, and comes back after `"value": 1`.
 
 Without GPIO the testbench still provides serial and debug for every plugged-in
 device; GPIO only adds automated download-mode entry and flap recovery.

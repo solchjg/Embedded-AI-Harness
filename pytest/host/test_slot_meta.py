@@ -179,3 +179,41 @@ def test_fr044_a_bench_without_wires():
                                bench={"gpio_boot": None, "gpio_en": None})
     assert got["SLOT1"] == default == {"gpio_boot": None, "gpio_en": None}
     assert notes == []
+
+
+# ── FR-045 ────────────────────────────────────────────────────────────────
+
+def test_fr045_banner_after_the_pulse_counts():
+    lines = [{"ts": T0 + 0.5, "text": "ESP-ROM:esp32s3-20210327"}]
+    assert sm.reset_evidence(T0, lines, []) == "banner"
+
+
+def test_fr045_banner_from_before_the_pulse_does_not():
+    lines = [{"ts": T0 - 1, "text": "rst:0x1 (POWERON),boot:0x8 (SPI_FAST_FLASH_BOOT)"}]
+    assert sm.reset_evidence(T0, lines, []) is None
+
+
+def test_fr045_native_usb_leaving_the_bus_counts():
+    events = [(T0 + 0.05, "remove"), (T0 + 1.2, "add")]
+    assert sm.reset_evidence(T0, [], events) == "usb"
+    assert sm.returned_after(T0, events)
+
+
+def test_fr045_an_add_alone_is_not_a_reset():
+    assert sm.reset_evidence(T0, [], [(T0 + 0.2, "add")]) is None
+
+
+def test_fr045_a_late_removal_is_the_board_sleeping_not_en():
+    # A board that goes to deep sleep on its own seconds later must not pass
+    # for a wired EN.
+    assert sm.reset_evidence(T0, [], [(T0 + 5.0, "remove")]) is None
+
+
+def test_fr045_events_before_the_pulse_are_ignored():
+    events = [(T0 - 0.5, "remove"), (T0 - 0.1, "add")]
+    assert sm.reset_evidence(T0, [], events) is None
+    assert not sm.returned_after(T0, events)
+
+
+def test_fr045_not_back_until_an_add():
+    assert not sm.returned_after(T0, [(T0 + 0.05, "remove")])
