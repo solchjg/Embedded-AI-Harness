@@ -1070,28 +1070,28 @@ def _usb_vid_pid(devnode: str | None, devpath: str | None) -> str | None:
 
 
 def _take_other_device(slot: dict, action: str, slot_key: str,
-                       devnode: str | None, devpath: str | None) -> bool:
-    """FR-045: set a non-console device aside; True when *slot_key* is one.
+                       devnode: str | None, devpath: str | None
+                       ) -> tuple[bool, str | None]:
+    """FR-045: set a non-console device aside.
 
-    On a slot pinned to a console VID:PID, a serial device with another
-    VID:PID (the SIM7670G's four CDC ports beside a board's CH343) is
-    recorded in `_other_devnodes` and nothing else: it is not a devnode of
-    the slot, not counted as a flap event, and never starts, stops or
-    restarts the slot's proxy. A remove is recognised by its key, since the
-    device's sysfs entry is gone by then.
+    Returns (aside, vid_pid). A serial device that is not the slot's console
+    (on a pinned slot any other VID:PID; on any slot a known modem vendor,
+    such as the SIM7670G's four CDC ports beside a board's CH343) is recorded
+    in `_other_devnodes` and nothing else: it is not a devnode of the slot,
+    not counted as a flap event, and never starts, stops or restarts the
+    slot's proxy. A remove is recognised by its key, since the device's
+    sysfs entry is gone by then.
     """
-    if not slot.get("_console_id"):
-        return False
     others = slot.setdefault("_other_devnodes", {})
     if action == "remove":
-        return others.pop(slot_key, None) is not None
+        return others.pop(slot_key, None) is not None, None
     if action != "add":
-        return slot_key in others
+        return slot_key in others, None
     vid_pid = _usb_vid_pid(devnode, devpath)
-    if not slot_meta.is_other_device(slot["_console_id"], vid_pid):
-        return False
+    if not slot_meta.is_other_device(slot.get("_console_id"), vid_pid):
+        return False, vid_pid
     others[slot_key] = devnode
-    return True
+    return True, vid_pid
 
 
 def scan_existing_devices():
@@ -1145,15 +1145,17 @@ def scan_existing_devices():
         else:
             slot = slots[slot_key]
 
-        if _take_other_device(slot, "add", slot_key, devnode, devpath):
-            print(f"[portal] boot scan: {slot['label']}: {devnode} is not the "
-                  f"console ({slot['_console_id']}), set aside", flush=True)
+        aside, vid_pid = _take_other_device(slot, "add", slot_key, devnode, devpath)
+        if aside:
+            print(f"[portal] boot scan: {slot['label']}: {devnode} ({vid_pid}) "
+                  f"is not the console, set aside", flush=True)
             continue
 
         slot["_devnodes"][slot_key] = devnode
         slot["present"] = True
-        if not slot["devnode"]:
-            slot["devnode"] = devnode  # first devnode becomes primary
+        if (not slot["devnode"]
+                or slot_meta.is_console(slot.get("_console_id"), vid_pid)):
+            slot["devnode"] = devnode  # first devnode, or the pinned console
         slot["state"] = STATE_IDLE
         if slot["tcp_port"]:
             slot["url"] = f"rfc2217://{host_ip}:{slot['tcp_port']}"
@@ -3206,11 +3208,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         # FR-045: another device on a slot pinned to its console changes
         # nothing about the slot: no flap event, no proxy restart.
-        if _take_other_device(slot, action, slot_key, devnode, devpath):
+        aside, vid_pid = _take_other_device(slot, action, slot_key, devnode, devpath)
+        if aside:
             _refresh_all_usb_devices()
             label = slot["label"] or slot_key[-20:]
             print(f"[portal] hotplug: {action} {label} {devnode} ignored "
-                  f"(not the console {slot['_console_id']})", flush=True)
+                  f"(not the console)", flush=True)
             self._send_json({
                 "ok": True, "slot_key": slot_key, "seq": seq_counter,
                 "accepted": False, "other_device": True,
@@ -3307,6 +3310,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # name. Only a portal restart cleared it.
             if not slot["devnode"] or not os.path.exists(slot["devnode"]):
                 slot["devnode"] = devnode
+            # FR-045: the pinned console takes the proxy whatever came first
+            # (a device whose VID:PID could not be read, say).
+            if slot_meta.is_console(slot.get("_console_id"), vid_pid):
+                slot["devnode"] = devnode
             if slot["tcp_port"]:
                 slot["url"] = f"rfc2217://{host_ip}:{slot['tcp_port']}"
             if not slot["flapping"]:
@@ -3317,10 +3324,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 # Start proxy in a background thread so we don't block the
                 # HTTP response for the settle + port-listen check.
-                def _bg_start(s=slot, lk=lock, dn=devnode):
+                def _bg_start(s=slot, lk=lock, dn=devnode, vp=vid_pid):
                     # Native USB (ttyACM): delay before opening port so the
-                    # chip boots past the download-mode-sensitive phase.
-                    if dn and "ttyACM" in dn:
+                    # chip boots past the download-mode-sensitive phase. A
+                    # USB-UART bridge on cdc_acm (CH343) needs no delay, and
+                    # the delay would cost it the ROM banner after a reset.
+                    if dn and "ttyACM" in dn and slot_meta.needs_boot_delay(vp):
                         time.sleep(NATIVE_USB_BOOT_DELAY_S)
                     with lk:
                         if s["flapping"] or s["_recovering"]:

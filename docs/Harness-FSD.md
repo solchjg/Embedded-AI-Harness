@@ -3468,11 +3468,17 @@ slot then has no way to know which one is the console.
 - A slot definition in `testbench.json` may name `console_vid_pid`, a USB
   VID:PID (four hex digits each, case ignored). A malformed value is ignored
   with a log line at start and the slot is not pinned.
-- On a pinned slot, a serial device whose VID:PID is known and differs is set
-  aside: it is not a devnode of the slot, never the console, not counted as a
-  hotplug event for flap detection, and its add or remove never starts, stops
-  or restarts the slot's proxy. A device whose VID:PID cannot be read is
-  treated as the slot's, as on an unpinned slot.
+- A serial device is set aside when its VID:PID is known and, on a pinned
+  slot, differs from the pin, or, on any slot, is a cellular modem's (SIMCom
+  1e0e, Quectel 2c7c, Telit 1bc7, Qualcomm 05c6). A device set aside is not a
+  devnode of the slot, never the console, not counted as a hotplug event for
+  flap detection, and its add or remove never starts, stops or restarts the
+  slot's proxy. A device whose VID:PID cannot be read is the slot's.
+- The pinned console takes the proxy when it appears, even when another
+  device of the slot holds it.
+- A USB-UART bridge on `cdc_acm` (WCH 1a86, Silicon Labs 10c4, FTDI 0403,
+  Prolific 067b) is opened without the native-USB boot delay, so the proxy
+  catches its first lines after a reset.
 - `GET /api/devices` shall report `console_vid_pid` (or null) and
   `other_devnodes`, the devices set aside.
 - `rfc2217-learn-slots --console LABEL=VID:PID` (and `update-bench.sh
@@ -3483,7 +3489,9 @@ slot then has no way to know which one is the console.
 | ID | Precondition · stimulus | Expected observation | Must NOT happen | Tier |
 |---|---|---|---|---|
 | FR-045 | `console_vid_pid` values: upper case, empty, null, malformed, not a string · clean | Lower case; no pin; no pin; refused; refused | A typo pinning the console to nothing | host |
-| FR-045 | Pinned slot · device with the pin's VID:PID, another VID:PID, unknown VID:PID; unpinned slot | Console; set aside; console; console | The console lost to a failed sysfs read | host |
+| FR-045 | Pinned slot · device with the pin's VID:PID, another VID:PID, unknown VID:PID; unpinned slot · a modem's port, anything else | Console; set aside; the slot's; set aside; the slot's | The console lost to a failed sysfs read | host |
+| FR-045 | Pinned slot whose proxy is on an unidentified device · the console appears | The proxy moves to the console | The proxy left on the other device | host |
+| FR-045 | ttyACM of a USB-UART bridge, of Espressif native USB, unidentified · open | At once; after the boot delay; after the boot delay | A bridge's ROM banner lost to the delay | host |
 | FR-045 | A slot with a console pin in `testbench.json` · re-learn slots; `--console` set and cleared | The pin kept; set; removed | The pin lost on re-learn | host |
 | FR-045 | SIM7670G board pinned to 1a86:55d3 · firmware powers the modem | The proxy keeps serving the CH343 from reset on; modem ports under `other_devnodes`; no flapping | The console moving to a modem port; a proxy restart when the modem's ports appear | bench |
 | FR-044 | Bench-wide pair; slots with none, their own pair, `null`, one key, a repeated pin, a pin outside 16 – 27, BOOT = EN · resolve | Bench pair; own pair; unwired; that key only; first slot keeps it; dropped; unwired; a log line for each drop | Two slots driving one pin; the bench-wide pair driven for a slot after another slot took it | host |
@@ -4416,4 +4424,6 @@ took a modem port as its console and restarted its proxy when they appeared,
 losing the first half-minute of every boot.
 
 - FR-045: a slot's `console_vid_pid` makes that USB device its console; other
-  serial devices on its port path are set aside and change nothing about the slot
+  serial devices on its port path, and a cellular modem's ports on any slot,
+  are set aside and change nothing about the slot; a USB-UART bridge's tty is
+  opened without the native-USB boot delay

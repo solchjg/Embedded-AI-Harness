@@ -205,6 +205,13 @@ def slot_gpio_pins(bench: dict, slot_defs: list[dict],
 
 # FR-045 ───────────────────────────────────────────────────────────────────
 
+# Cellular modems whose CDC ports sit beside a board's console: SIMCom,
+# Quectel, Telit, Qualcomm. Their ports are never a console, pin or no pin.
+MODEM_VIDS = frozenset({"1e0e", "2c7c", "1bc7", "05c6"})
+# USB-UART bridges (WCH, Silicon Labs, FTDI, Prolific). A bridge's tty can be
+# opened at once; only Espressif's native USB needs the boot delay.
+BRIDGE_VIDS = frozenset({"1a86", "10c4", "0403", "067b"})
+
 _VID_PID = re.compile(r"^([0-9a-f]{4}):([0-9a-f]{4})$")
 _USB_DEVICE = re.compile(r"^\d+-\d+(?:\.\d+)*$")
 
@@ -242,14 +249,28 @@ def usb_device_from_devpath(devpath: str) -> str | None:
 
 
 def is_other_device(console_id: str | None, vid_pid: str | None) -> bool:
-    """FR-045: is a serial device with *vid_pid* on a pinned slot not its console?
+    """FR-045: is a serial device with *vid_pid* not its slot's console?
 
-    True only when the slot is pinned and the device's VID:PID is known and
-    differs. An unpinned slot, or a device whose VID:PID could not be read,
-    keeps the old behaviour (every serial device on the port is the slot's),
-    so the pin can only narrow what the slot follows, never lose its console
-    to a failed sysfs read.
+    On a pinned slot, true when the device's VID:PID is known and differs. On
+    an unpinned slot, true only for a known modem vendor (MODEM_VIDS). A
+    device whose VID:PID could not be read is always the slot's, so a failed
+    sysfs read never loses the console.
     """
-    if not console_id or not vid_pid:
+    if not vid_pid:
         return False
-    return vid_pid.lower() != console_id
+    vid_pid = vid_pid.lower()
+    if console_id:
+        return vid_pid != console_id
+    return vid_pid.split(":")[0] in MODEM_VIDS
+
+
+def is_console(console_id: str | None, vid_pid: str | None) -> bool:
+    """FR-045: is this the pinned console itself? (False on an unpinned slot.)"""
+    return bool(console_id and vid_pid and vid_pid.lower() == console_id)
+
+
+def needs_boot_delay(vid_pid: str | None) -> bool:
+    """Wait before opening this ttyACM? Not for a USB-UART bridge: the delay
+    keeps a native-USB ESP32 out of download mode, and on a bridge it only
+    loses the first lines after a reset (the ROM banner)."""
+    return not (vid_pid and vid_pid.split(":")[0].lower() in BRIDGE_VIDS)

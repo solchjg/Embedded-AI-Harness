@@ -23,6 +23,8 @@ SIM7670 = "1e0e:9011"
 BASE = "platform-3f980000.usb-usb-0:1.1.1"
 CONSOLE_KEY = BASE + ".4:1.0"
 MODEM_KEYS = [BASE + f".2:1.{i}" for i in range(2, 6)]
+UNKNOWN_KEY = BASE + ".3:1.0"   # a device whose VID:PID cannot be read
+OTHER_KEY = BASE + ".1:1.0"     # an ESP32's native USB
 
 
 @pytest.fixture
@@ -31,13 +33,21 @@ def bench(monkeypatch, tmp_path):
     cfg.write_text('{"slots": [{"label": "SLOT2", "usb_prefix": "0:1.1.1", '
                    '"tcp_port": 4002, "console_vid_pid": "1A86:55D3"}]}')
     monkeypatch.setattr(portal, "slots", portal.load_config(str(cfg)))
-    ids = {CONSOLE_KEY: CH343, **{k: SIM7670 for k in MODEM_KEYS}}
+    ids = {CONSOLE_KEY: CH343, UNKNOWN_KEY: None, OTHER_KEY: "303a:1001",
+           **{k: SIM7670 for k in MODEM_KEYS}}
     by_node = {}
     monkeypatch.setattr(portal, "_usb_vid_pid",
                         lambda devnode, devpath: by_node.get(devnode))
     calls = []
-    monkeypatch.setattr(portal, "start_proxy", lambda s: calls.append(("start", s["devnode"])))
-    monkeypatch.setattr(portal, "stop_proxy", lambda s: calls.append(("stop", s["devnode"])))
+    def start(s):
+        calls.append(("start", s["devnode"]))
+        s.update(running=True, pid=1)
+
+    def stop(s):
+        calls.append(("stop", s["devnode"]))
+        s.update(running=False, pid=None)
+    monkeypatch.setattr(portal, "start_proxy", start)
+    monkeypatch.setattr(portal, "stop_proxy", stop)
     monkeypatch.setattr(portal, "_refresh_all_usb_devices", lambda: None)
     monkeypatch.setattr(portal, "log_activity", lambda *a, **k: None)
     monkeypatch.setattr(portal, "_start_flap_recovery",
@@ -102,8 +112,20 @@ def test_fr045_modem_first_never_becomes_the_console(bench):
     assert calls == [("start", "/dev/ttyACM4")]
 
 
-def test_fr045_unpinned_slot_keeps_old_behaviour(bench):
+def test_fr045_pinned_console_takes_the_proxy_from_an_unknown_device(bench):
+    slot, event, calls = bench
+    event("add", UNKNOWN_KEY, "/dev/ttyACM0")   # kept: its id is unreadable
+    assert slot["devnode"] == "/dev/ttyACM0"
+    calls.clear()
+    event("add", CONSOLE_KEY, "/dev/ttyACM1")
+    assert slot["devnode"] == "/dev/ttyACM1"
+    assert calls == [("stop", "/dev/ttyACM1"), ("start", "/dev/ttyACM1")]
+
+
+def test_fr045_unpinned_slot_sets_modems_aside_by_vendor(bench):
     slot, event, calls = bench
     slot["_console_id"] = None
-    event("add", MODEM_KEYS[0], "/dev/ttyACM1")
-    assert slot["devnode"] == "/dev/ttyACM1" and calls == [("start", "/dev/ttyACM1")]
+    assert event("add", MODEM_KEYS[0], "/dev/ttyACM1")["other_device"] is True
+    assert slot["devnode"] is None and calls == []
+    event("add", OTHER_KEY, "/dev/ttyACM2")
+    assert slot["devnode"] == "/dev/ttyACM2" and calls == [("start", "/dev/ttyACM2")]

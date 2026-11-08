@@ -220,7 +220,27 @@ SIM7670 = "1e0e:9011"
     (CH343, "1A86:55D3", False),  # case ignored
     (CH343, SIM7670, True),      # the modem: set aside
     (CH343, None, False),        # unreadable: kept, never lose the console
-    (None, SIM7670, False),      # unpinned: every device is the slot's
+    (None, SIM7670, True),       # unpinned: a modem vendor is still aside
+    (None, "2c7c:0125", True),   # Quectel
+    (None, CH343, False),        # unpinned: anything else is the slot's
+    (None, "303a:1001", False),  # Espressif native USB
+    (None, None, False),
 ])
 def test_fr045_is_other_device(pin, vid_pid, other):
     assert sm.is_other_device(pin, vid_pid) is other
+
+
+@pytest.mark.parametrize("pin,vid_pid,want", [
+    (CH343, CH343, True), (CH343, SIM7670, False), (CH343, None, False),
+    (None, CH343, False),
+])
+def test_fr045_is_console(pin, vid_pid, want):
+    assert sm.is_console(pin, vid_pid) is want
+
+
+@pytest.mark.parametrize("vid_pid,want", [
+    (CH343, False), ("10c4:ea60", False),   # bridges: open at once
+    ("303a:1001", True), (None, True),      # native USB, unknown: wait
+])
+def test_fr045_boot_delay_only_for_native_usb(vid_pid, want):
+    assert sm.needs_boot_delay(vid_pid) is want
