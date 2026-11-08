@@ -173,3 +173,29 @@ def test_merge_without_a_config_numbers_ports_in_order():
 def test_merge_reports_a_pinned_board_that_is_missing():
     _, notes = us.merge_config(OLD, HUB, {"SLOT1": "00:00"})
     assert any("not found" in n for n in notes)
+
+
+def test_merge_keeps_a_slots_console_pin():
+    # FR-045: a console pin is a fact about the board, not the topology.
+    old = dict(OLD, slots=[dict(OLD["slots"][0], console_vid_pid="1a86:55d3"),
+                           OLD["slots"][1]])
+    cfg, _ = us.merge_config(old, HUB, {"SLOT1": TDISPLAY.lower()})
+    got = _by_label(cfg)
+    assert got["SLOT1"]["console_vid_pid"] == "1a86:55d3"
+    assert "console_vid_pid" not in got["SLOT2"]
+
+
+def test_merge_sets_and_clears_a_console_pin():
+    cfg, notes = us.merge_config(OLD, HUB, consoles={"SLOT2": "1A86:55D3"})
+    assert _by_label(cfg)["SLOT2"]["console_vid_pid"] == "1a86:55d3"
+    assert any("console pinned" in n for n in notes)
+    again, notes = us.merge_config(cfg, HUB, consoles={"SLOT2": "1a86:55d3"})
+    assert again == cfg and not any("console" in n for n in notes)
+    cleared, notes = us.merge_config(cfg, HUB, consoles={"SLOT2": ""})
+    assert "console_vid_pid" not in _by_label(cleared)["SLOT2"]
+    assert any("console pin removed" in n for n in notes)
+
+
+def test_merge_reports_a_console_pin_for_a_missing_slot():
+    _, notes = us.merge_config(OLD, HUB, consoles={"SLOT9": "1a86:55d3"})
+    assert any("SLOT9" in n and "no such slot" in n for n in notes)

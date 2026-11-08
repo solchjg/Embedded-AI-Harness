@@ -119,12 +119,15 @@ def _label_num(label: str) -> int | None:
 
 
 def merge_config(existing: dict | None, learned: list[dict],
-                 pins: dict[str, str] | None = None) -> tuple[dict, list[str]]:
+                 pins: dict[str, str] | None = None,
+                 consoles: dict[str, str] | None = None) -> tuple[dict, list[str]]:
     """Fold freshly learned ports into an existing testbench.json.
 
     *learned* is one {"usb_prefix", "serial"} per occupied port. *pins* maps a
     slot label to a USB serial (an ESP32-S3's is its MAC): that label moves to
-    whichever port the board with that serial is on now.
+    whichever port the board with that serial is on now. *consoles* maps a
+    slot label to the VID:PID of its console (FR-045), set as that slot's
+    `console_vid_pid`; an empty value removes the pin.
 
     Kept from *existing*: gpio pins, debug probes, every slot's label and TCP,
     GDB and telnet ports, and slots whose port is still valid (an empty port
@@ -199,6 +202,21 @@ def merge_config(existing: dict | None, learned: list[dict],
     for s in free:
         notes.append(f"{s['label']}: removed, no port left for it")
     slots_out = [s for s in slots_out if s.get("usb_prefix")]
+
+    for label, vid_pid in (consoles or {}).items():
+        target = next((s for s in slots_out if s["label"] == label), None)
+        if target is None:
+            notes.append(f"{label}: no such slot, console pin not set")
+            continue
+        vid_pid = (vid_pid or "").lower()
+        if (target.get("console_vid_pid") or "") == vid_pid:
+            continue
+        if vid_pid:
+            target["console_vid_pid"] = vid_pid
+            notes.append(f"{label}: console pinned to {vid_pid}")
+        else:
+            target.pop("console_vid_pid", None)
+            notes.append(f"{label}: console pin removed")
 
     for key, base in (("tcp_port", 4000), ("gdb_port", 3332),
                       ("openocd_telnet_port", 4443)):

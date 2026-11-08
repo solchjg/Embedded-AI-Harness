@@ -187,7 +187,10 @@ debug probes; giving every port of each hub a slot, empty ones too), shows the
 diff and asks, keeps the old file as `testbench.json.<time>.bak`, restarts the
 portal and prints each slot's port, device and chip. `--pin LABEL=SERIAL` keeps
 a slot on one board wherever it is plugged (an ESP32-S3's USB serial is its
-MAC); `--no-learn` updates the code only; `--help` lists the rest.
+MAC); `--console LABEL=VID:PID` makes one USB device the slot's console, for a
+board with more serial devices behind it (`--console SLOT2=1a86:55d3`, the
+CH343 of a Waveshare SIM7670G board, whose modem adds four more);
+`--no-learn` updates the code only; `--help` lists the rest.
 
 ### 2.4 Verify
 
@@ -234,6 +237,7 @@ Then edit `/etc/rfc2217/testbench.json`:
 |-------|-------------|
 | `gpio_boot` / `gpio_en` | Pi BCM GPIO wired to DUT BOOT (GPIO0/GPIO9) and EN/RST, for every slot that names no pins of its own. Omit or `null` if not wired. |
 | `slots[].gpio_boot` / `gpio_en` | This slot's own BOOT/EN pins (BCM 16 – 27), so two boards can be wired at once. `null` means no wire on that line. A pin a slot names is never driven for another slot. |
+| `slots[].console_vid_pid` | USB VID:PID of the slot's console, e.g. `"1a86:55d3"`. Other serial devices on the slot's port path are then listed under `other_devnodes` and never become the console or restart its proxy. Without it, only a cellular modem's ports (SIMCom, Quectel, Telit, Qualcomm) are set aside. |
 | `slots[].label` | Slot name shown in the UI |
 | `slots[].usb_prefix` | Port path of the slot's USB port, e.g. `"0:1.2"` (a Pi port) or `"0:1.1.2"` (port 2 of a hub on Pi port 1). `rfc2217-learn-slots` prints one per occupied port. Auto-detected if omitted. |
 | `slots[].tcp_port` / `gdb_port` / `openocd_telnet_port` | Default to `4000+i` / `3332+i` / `4443+i` |

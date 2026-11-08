@@ -1036,7 +1036,8 @@ when the slot is not currently flapping.
 ```
 
 `gpio_boot` and `gpio_en` are optional per slot (FR-044).  Slots without them use
-the no-GPIO backoff path.
+the no-GPIO backoff path. `console_vid_pid` is optional per slot (FR-045); events
+from the other serial devices it sets aside never count toward flapping.
 
 #### 7.8 Web UI
 
@@ -3457,10 +3458,44 @@ reset by a recovery or wiring test meant for the first.
 - Recovery, release, the wiring test (FR-042) and `GET /api/devices` use the
   slot's own pins. `rfc2217-learn-slots` keeps them when it re-learns ports.
 
+### FR-045 — Console Pinned to a USB VID:PID
+
+A board can put more than one serial device on its slot's port path: the
+Waveshare ESP32-S3-SIM7670G has its CH343 console (1a86:55d3) and, whenever the
+firmware powers the modem, the SIM7670G's four CDC ports on the same hub. The
+slot then has no way to know which one is the console.
+
+- A slot definition in `testbench.json` may name `console_vid_pid`, a USB
+  VID:PID (four hex digits each, case ignored). A malformed value is ignored
+  with a log line at start and the slot is not pinned.
+- A serial device is set aside when its VID:PID is known and, on a pinned
+  slot, differs from the pin, or, on any slot, is a cellular modem's (SIMCom
+  1e0e, Quectel 2c7c, Telit 1bc7, Qualcomm 05c6). A device set aside is not a
+  devnode of the slot, never the console, not counted as a hotplug event for
+  flap detection, and its add or remove never starts, stops or restarts the
+  slot's proxy. A device whose VID:PID cannot be read is the slot's.
+- The pinned console takes the proxy when it appears, even when another
+  device of the slot holds it. When the device the proxy has goes away and
+  another of the slot's devices remains, the proxy reopens on that one.
+- A USB-UART bridge on `cdc_acm` (WCH 1a86, Silicon Labs 10c4, FTDI 0403,
+  Prolific 067b) is opened without the native-USB boot delay, so the proxy
+  catches its first lines after a reset.
+- `GET /api/devices` shall report `console_vid_pid` (or null) and
+  `other_devnodes`, the devices set aside.
+- `rfc2217-learn-slots --console LABEL=VID:PID` (and `update-bench.sh
+  --console`) sets the pin; `LABEL=` removes it. Re-learning keeps it.
+
 **Verification contract**
 
 | ID | Precondition · stimulus | Expected observation | Must NOT happen | Tier |
 |---|---|---|---|---|
+| FR-045 | `console_vid_pid` values: upper case, empty, null, malformed, not a string · clean | Lower case; no pin; no pin; refused; refused | A typo pinning the console to nothing | host |
+| FR-045 | Pinned slot · device with the pin's VID:PID, another VID:PID, unknown VID:PID; unpinned slot · a modem's port, anything else | Console; set aside; the slot's; set aside; the slot's | The console lost to a failed sysfs read | host |
+| FR-045 | Pinned slot whose proxy is on an unidentified device · the console appears | The proxy moves to the console | The proxy left on the other device | host |
+| FR-045 | Proxy on one of a slot's two devices · that device goes | The proxy reopens on the other | The slot shown running while its proxy reads a dead port | host |
+| FR-045 | ttyACM of a USB-UART bridge, of Espressif native USB, unidentified · open | At once; after the boot delay; after the boot delay | A bridge's ROM banner lost to the delay | host |
+| FR-045 | A slot with a console pin in `testbench.json` · re-learn slots; `--console` set and cleared | The pin kept; set; removed | The pin lost on re-learn | host |
+| FR-045 | SIM7670G board pinned to 1a86:55d3 · firmware powers the modem | The proxy keeps serving the CH343 from reset on; modem ports under `other_devnodes`; no flapping | The console moving to a modem port; a proxy restart when the modem's ports appear | bench |
 | FR-044 | Bench-wide pair; slots with none, their own pair, `null`, one key, a repeated pin, a pin outside 16 – 27, BOOT = EN · resolve | Bench pair; own pair; unwired; that key only; first slot keeps it; dropped; unwired; a log line for each drop | Two slots driving one pin; the bench-wide pair driven for a slot after another slot took it | host |
 | FR-044 | A slot with its own pins in `testbench.json` · re-learn slots | The pins kept on that slot | Per-slot pins lost | host |
 | FR-044 | Two ESP32 boards wired to their own pairs · BOOT/EN test on each | Each passes; the other board's serial shows no reset | A reset on the board in the other slot | bench |
@@ -4382,3 +4417,15 @@ slot drove the same BCM 17/18, so a reset meant for one board reached the other.
 - FR-044: each slot in `testbench.json` can name its own `gpio_boot`/`gpio_en`;
   the bench-wide pair goes only to slots that name none and is never shared
   with a slot that took it for itself
+
+### 2026-11-08 — console pinned to a USB VID:PID
+
+Asked for by the bench's operator: on the Waveshare SIM7670G board the modem's
+four USB ports appear on the same hub path as the CH343 console, so the slot
+took a modem port as its console and restarted its proxy when they appeared,
+losing the first half-minute of every boot.
+
+- FR-045: a slot's `console_vid_pid` makes that USB device its console; other
+  serial devices on its port path, and a cellular modem's ports on any slot,
+  are set aside and change nothing about the slot; a USB-UART bridge's tty is
+  opened without the native-USB boot delay

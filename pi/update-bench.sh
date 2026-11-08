@@ -4,6 +4,7 @@
 # Run on the Pi, from a clone of this repository:
 #   sudo bash pi/update-bench.sh                         # pull, install, re-learn slots
 #   sudo bash pi/update-bench.sh --pin SLOT1=48:27:E2:EA:48:3C
+#   sudo bash pi/update-bench.sh --console SLOT2=1a86:55d3   # console is the CH343
 #   sudo bash pi/update-bench.sh --no-learn              # code only, keep testbench.json
 # Other options: --no-pull (install the checkout as it is), --occupied-only (no
 # slots for empty hub ports), --yes (write the config without asking), --force
@@ -17,7 +18,9 @@
 #   4. rfc2217-learn-slots --merge: fold the ports that now hold boards (and
 #      the empty ports on the same hubs) into the existing testbench.json,
 #      keeping labels, TCP/GDB ports, GPIO pins and debug probes. --pin keeps
-#      a label on a given board wherever it is plugged. Shows the diff, asks,
+#      a label on a given board wherever it is plugged; --console LABEL=VID:PID
+#      makes that USB device the slot's console and has the portal ignore the
+#      other serial devices on its port path (FR-045). Shows the diff, asks,
 #      backs up the old file as testbench.json.<time>.bak, writes the new one.
 #   5. Restarts the portal and prints every slot: port, device, chip.
 #
@@ -35,6 +38,8 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --pin)       PINS+=(--pin "$2"); shift ;;
         --pin=*)     PINS+=(--pin "${1#--pin=}") ;;
+        --console)   PINS+=(--console "$2"); shift ;;
+        --console=*) PINS+=(--console "${1#--console=}") ;;
         --no-pull)   PULL=0 ;;
         --no-learn)  LEARN=0 ;;
         --occupied-only) EMPTY=0 ;;
