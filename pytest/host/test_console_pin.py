@@ -69,9 +69,17 @@ def bench(monkeypatch, tmp_path):
     monkeypatch.setattr(portal.threading, "Thread", Thread)
     monkeypatch.setattr(portal.time, "sleep", lambda s: None)
 
+    live = set()   # the tty nodes that exist, as the kernel would have them
+    real_exists = portal.os.path.exists
+    monkeypatch.setattr(portal.os.path, "exists",
+                        lambda p: p in live if str(p).startswith("/dev/tty") else real_exists(p))
+
     def event(action, key, node):
         if action == "add":
             by_node[node] = ids[key]
+            live.add(node)
+        else:
+            live.discard(node)
         h = portal.Handler.__new__(portal.Handler)
         h._read_json = lambda: {"action": action, "devnode": node, "id_path": key}
         out = {}
@@ -136,3 +144,17 @@ def test_fr045_unpinned_slot_sets_modems_aside_by_vendor(bench):
     assert slot["devnode"] is None and calls == []
     event("add", OTHER_KEY, "/dev/ttyACM2")
     assert slot["devnode"] == "/dev/ttyACM2" and calls == [("start", "/dev/ttyACM2")]
+
+
+def test_fr045_proxy_follows_when_its_node_goes_and_another_remains(bench):
+    # Seen on SLOT2: the proxy was on one port, that port went, the slot's
+    # devnode moved to the CH343, and the proxy went on reading the dead port.
+    slot, event, calls = bench
+    slot["_console_id"] = None
+    event("add", OTHER_KEY, "/dev/ttyACM2")
+    event("add", CONSOLE_KEY, "/dev/ttyACM4")   # proxy stays on ACM2
+    assert calls == [("start", "/dev/ttyACM2")]
+    calls.clear()
+    event("remove", OTHER_KEY, "/dev/ttyACM2")
+    assert slot["devnode"] == "/dev/ttyACM4"
+    assert calls == [("stop", "/dev/ttyACM4"), ("start", "/dev/ttyACM4")]

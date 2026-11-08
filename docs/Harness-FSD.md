@@ -3475,7 +3475,8 @@ slot then has no way to know which one is the console.
   flap detection, and its add or remove never starts, stops or restarts the
   slot's proxy. A device whose VID:PID cannot be read is the slot's.
 - The pinned console takes the proxy when it appears, even when another
-  device of the slot holds it.
+  device of the slot holds it. When the device the proxy has goes away and
+  another of the slot's devices remains, the proxy reopens on that one.
 - A USB-UART bridge on `cdc_acm` (WCH 1a86, Silicon Labs 10c4, FTDI 0403,
   Prolific 067b) is opened without the native-USB boot delay, so the proxy
   catches its first lines after a reset.
@@ -3491,6 +3492,7 @@ slot then has no way to know which one is the console.
 | FR-045 | `console_vid_pid` values: upper case, empty, null, malformed, not a string · clean | Lower case; no pin; no pin; refused; refused | A typo pinning the console to nothing | host |
 | FR-045 | Pinned slot · device with the pin's VID:PID, another VID:PID, unknown VID:PID; unpinned slot · a modem's port, anything else | Console; set aside; the slot's; set aside; the slot's | The console lost to a failed sysfs read | host |
 | FR-045 | Pinned slot whose proxy is on an unidentified device · the console appears | The proxy moves to the console | The proxy left on the other device | host |
+| FR-045 | Proxy on one of a slot's two devices · that device goes | The proxy reopens on the other | The slot shown running while its proxy reads a dead port | host |
 | FR-045 | ttyACM of a USB-UART bridge, of Espressif native USB, unidentified · open | At once; after the boot delay; after the boot delay | A bridge's ROM banner lost to the delay | host |
 | FR-045 | A slot with a console pin in `testbench.json` · re-learn slots; `--console` set and cleared | The pin kept; set; removed | The pin lost on re-learn | host |
 | FR-045 | SIM7670G board pinned to 1a86:55d3 · firmware powers the modem | The proxy keeps serving the CH343 from reset on; modem ports under `other_devnodes`; no flapping | The console moving to a modem port; a proxy restart when the modem's ports appear | bench |
