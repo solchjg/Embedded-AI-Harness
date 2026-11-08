@@ -220,3 +220,79 @@ def merge_config(existing: dict | None, learned: list[dict],
                     | {k: v for k, v in s.items() if k not in order}
                     for s in slots_out]
     return cfg, notes
+
+
+# ── Which of a slot's serial devices is the board's console (FR-046) ─────
+#
+# A board can put more than one serial device on its slot: a cellular board's
+# modem (SIMCom, Quectel) adds four or more ttyACM ports beside the board's own
+# USB-UART bridge, and they come and go whenever the firmware powers the modem.
+# The proxy belongs on the console. Modem ports must neither take the proxy
+# nor count as the board flapping.
+
+# Vendors whose serial device is a board's console: USB-UART bridges (WCH,
+# Silicon Labs, FTDI, Prolific) and Espressif's native USB.
+CONSOLE_VIDS = frozenset({"1a86", "10c4", "0403", "067b", "303a"})
+# Vendors whose serial devices are a cellular modem's ports, never a console.
+MODEM_VIDS = frozenset({"1e0e", "2c7c", "1bc7", "05c6"})
+
+_USB_ID_RE = re.compile(r"^[0-9a-f]{4}:[0-9a-f]{4}$")
+
+
+def clean_usb_id(value) -> str | None:
+    """'1A86:55D3' -> '1a86:55d3'; None for anything that is not VID:PID."""
+    if not isinstance(value, str):
+        return None
+    v = value.strip().lower()
+    return v if _USB_ID_RE.match(v) else None
+
+
+def device_role(usb_id: str | None, console_id: str | None = None) -> str:
+    """'console', 'aux' or 'other' for a serial device with *usb_id*.
+
+    With a slot's ``console_usb_id`` set, only that VID:PID is the console and
+    every other device is aux. Without it, the vendor decides: a known bridge
+    or Espressif is the console, a known modem is aux, anything else (unknown,
+    or a Notecard) is 'other', which takes the proxy only when no console is
+    there.
+    """
+    usb_id = clean_usb_id(usb_id)
+    console_id = clean_usb_id(console_id)
+    if console_id:
+        if usb_id is None:
+            return "other"
+        return "console" if usb_id == console_id else "aux"
+    if usb_id is None:
+        return "other"
+    vid = usb_id.split(":")[0]
+    if vid in CONSOLE_VIDS:
+        return "console"
+    if vid in MODEM_VIDS:
+        return "aux"
+    return "other"
+
+
+def console_keys(ids: dict, console_id: str | None = None) -> list:
+    """The keys of *ids* (key -> VID:PID or None) that may carry the proxy.
+
+    Consoles first; when there is none, the 'other' devices. Aux devices
+    never. In the order of *ids*.
+    """
+    roles = {k: device_role(v, console_id) for k, v in ids.items()}
+    first = [k for k, r in roles.items() if r == "console"]
+    return first or [k for k, r in roles.items() if r == "other"]
+
+
+def is_aux(ids: dict, key, console_id: str | None = None) -> bool:
+    """True when device *key* of a slot (*ids*: key -> VID:PID or None) is
+    not its console: a modem port, anything but ``console_usb_id`` when that
+    is set, or an unrecognised device while a console sits beside it. Such a
+    device is listed on the slot but never takes the proxy and never counts
+    as the board flapping."""
+    role = device_role(ids.get(key), console_id)
+    if role == "aux":
+        return True
+    if role == "console":
+        return False
+    return any(device_role(v, console_id) == "console"
+               for k, v in ids.items() if k != key)

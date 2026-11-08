@@ -612,6 +612,12 @@ def load_config(path: str) -> dict[str, dict]:
             )
             slot["_usb_prefix"] = prefix
             slot.update(slot_pins[label])
+            # FR-046: which of the slot's serial devices is the console.
+            cid = sdef.get("console_usb_id")
+            slot["console_usb_id"] = usb_slots.clean_usb_id(cid)
+            if cid is not None and slot["console_usb_id"] is None:
+                print(f"[portal] {label}: console_usb_id {cid!r} ignored, "
+                      f"not VID:PID", flush=True)
             # FR-041: a default name may sit in testbench.json; the one an
             # operator sets in the portal (slot-names.json) replaces it.
             try:
@@ -718,6 +724,8 @@ def _make_slot(slot_key: str, label: str = None, tcp_port: int = None,
         "pid": None,
         "devnode": None,
         "_devnodes": {},  # slot_key → devnode for all active devices on this slot
+        "_usb_ids": {},   # slot_key → "vvvv:pppp" of that device (FR-046)
+        "console_usb_id": None,  # FR-046: the board's console, when set
         "seq": 0,
         "last_action": None,
         "last_event_ts": None,
@@ -839,7 +847,7 @@ def _pick_best_devnode(slot: dict) -> str:
     and a dedicated serial chip (CH343, CP2102, etc.), the proxy should
     use the dedicated serial chip so it doesn't conflict with OpenOCD.
     """
-    devnodes = list(slot.get("_devnodes", {}).values())
+    devnodes = _console_devnodes(slot)  # FR-046: never a modem port
     if len(devnodes) <= 1:
         return slot["devnode"]
 
@@ -863,6 +871,38 @@ def _pick_best_devnode(slot: dict) -> str:
         slot["devnode"] = non_jtag[0]
         return non_jtag[0]
     return slot["devnode"]
+
+
+def _usb_id_of(devnode: str) -> str | None:
+    """'vvvv:pppp' of the USB device behind *devnode*, or None."""
+    try:
+        out = subprocess.check_output(
+            ["udevadm", "info", "-q", "property", "-n", devnode],
+            text=True, timeout=3)
+    except Exception:
+        return None
+    props = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+    return usb_slots.clean_usb_id(
+        f"{props.get('ID_VENDOR_ID', '')}:{props.get('ID_MODEL_ID', '')}")
+
+
+def _slot_usb_ids(slot: dict) -> dict:
+    ids = slot.setdefault("_usb_ids", {})
+    return {k: ids.get(k) for k in slot.get("_devnodes", {})}
+
+
+def _console_devnodes(slot: dict) -> list:
+    """FR-046: the slot's devnodes that may carry the proxy, console first."""
+    keys = usb_slots.console_keys(_slot_usb_ids(slot), slot.get("console_usb_id"))
+    return [slot["_devnodes"][k] for k in keys]
+
+
+def _console_devnode(slot: dict) -> str | None:
+    """FR-046: the devnode the proxy belongs on; the current one if allowed."""
+    nodes = _console_devnodes(slot)
+    if slot.get("devnode") in nodes:
+        return slot["devnode"]
+    return nodes[0] if nodes else None
 
 
 def start_proxy(slot: dict) -> bool:
@@ -1095,9 +1135,19 @@ def scan_existing_devices():
             slot = slots[slot_key]
 
         slot["_devnodes"][slot_key] = devnode
+        slot.setdefault("_usb_ids", {})[slot_key] = usb_slots.clean_usb_id(
+            f"{props.get('ID_VENDOR_ID', '')}:{props.get('ID_MODEL_ID', '')}")
+        # FR-046: the proxy goes on the console, never on a modem port.
+        best = _console_devnode(slot)
+        if best is None:
+            print(f"[portal] boot scan: {devnode} on {slot['label']} is not "
+                  f"its console, no proxy", flush=True)
+            continue
         slot["present"] = True
-        if not slot["devnode"]:
-            slot["devnode"] = devnode  # first devnode becomes primary
+        if slot["running"] and slot["devnode"] != best:
+            with slot["_lock"]:
+                stop_proxy(slot)
+        slot["devnode"] = best
         slot["state"] = STATE_IDLE
         if slot["tcp_port"]:
             slot["url"] = f"rfc2217://{host_ip}:{slot['tcp_port']}"
@@ -3185,6 +3235,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
             })
             return
 
+        # -- FR-046: a device that is not the board's console (a cellular
+        # modem's ports, which come and go with the modem's power) is listed
+        # on the slot, but neither counts as flapping nor touches the proxy.
+        if action == "add" and devnode:
+            slot.setdefault("_usb_ids", {})[slot_key] = _usb_id_of(devnode)
+        _ids = _slot_usb_ids(slot)
+        _ids[slot_key] = slot["_usb_ids"].get(slot_key)
+        if usb_slots.is_aux(_ids, slot_key, slot.get("console_usb_id")):
+            if action == "add":
+                slot["_devnodes"][slot_key] = devnode
+            elif action == "remove":
+                slot["_devnodes"].pop(slot_key, None)
+                slot["_usb_ids"].pop(slot_key, None)
+            _refresh_all_usb_devices()
+            log_activity(f"USB {action}: {label} ({devnode or '?'}, "
+                         f"{_ids[slot_key] or 'unknown id'}) is not the "
+                         f"console; proxy left alone", "info")
+            self._send_json({
+                "ok": True, "slot_key": slot_key, "seq": seq_counter,
+                "accepted": False, "console": False,
+            })
+            return
+
         # -- Flap detection --
         now = time.time()
         slot["_event_times"].append(now)
@@ -3256,12 +3329,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         # If proxy is already running on a different devnode,
                         # don't restart — this hotplug is for the JTAG interface
                         # which doesn't need a proxy.
+                        consoles = _console_devnodes(s)
                         if (s["running"] and s["pid"]
-                                and s["devnode"] and s["devnode"] != dn):
+                                and s["devnode"] and s["devnode"] != dn
+                                and s["devnode"] in consoles):
+                            return
+                        # FR-046: the console, even when another device's
+                        # add came first.
+                        best = _console_devnode(s) or dn
+                        if (s["running"] and s["pid"]
+                                and s["devnode"] == best and best != dn):
                             return
                         # Stop existing proxy first if still running
                         if s["running"] and s["pid"]:
                             stop_proxy(s)
+                        s["devnode"] = best
                         # Compute URL
                         if s["tcp_port"]:
                             s["url"] = f"rfc2217://{host_ip}:{s['tcp_port']}"
@@ -3344,8 +3426,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif action == "remove":
             # Remove this devnode from the slot's set
             slot["_devnodes"].pop(slot_key, None)
+            slot.setdefault("_usb_ids", {}).pop(slot_key, None)
+            remaining = _console_devnodes(slot)  # FR-046
             # Only go absent if no devnodes remain
-            if not slot["_devnodes"]:
+            if not remaining:
                 slot["present"] = False
                 slot["devnode"] = None
                 # _auto_debug_chip and _jtag_slot stay: deep sleep looks like
@@ -3355,14 +3439,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 # Other devnodes still active — update primary if needed
                 if slot["devnode"] == devnode:
-                    slot["devnode"] = next(iter(slot["_devnodes"].values()))
+                    slot["devnode"] = remaining[0]
             # Stop debug session if active (preserves _auto_debug_chip
             # so debug auto-restarts on next hotplug add after flash)
             _rm_label = slot.get("label")
             if _rm_label and debug_controller.is_debugging(_rm_label):
                 debug_controller.stop(_rm_label)
             # Stop proxy if no devnodes left
-            if slot["running"] and not slot["_devnodes"]:
+            if slot["running"] and not remaining:
                 def _bg_stop(s=slot, lk=lock):
                     with lk:
                         stop_proxy(s)

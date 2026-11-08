@@ -3470,6 +3470,37 @@ reset by a recovery or wiring test meant for the first.
 | FR-042 | Stored result · board absent, same board, other board, older than the limit, legacy record | Hidden; shown; `other_board`; `stale`; `stale` | A result shown for an empty slot or another board; `gpio_wired` true from a stale result | host |
 | FR-042 | Measurement time · format | Ends in `EST` or `EDT` per the date | A UTC or naive time on the card | host |
 
+### FR-046 — The Proxy Stays on the Board's Console
+
+A cellular board puts its modem's serial ports (four or more ttyACM devices) on
+the same USB port as its own USB-UART bridge, and they come and go each time the
+firmware powers the modem. On the Waveshare ESP32-S3-SIM7670G every reset and
+wake gave the proxy to a modem port for about 10 s, and the modem's adds and
+removes counted as the board flapping, so the first ~36 s of each boot never
+reached the serial log.
+
+- Each serial device on a slot is the slot's **console**, **aux** or
+  **other**. With a `console_usb_id` (`"vvvv:pppp"`) on the slot in
+  `testbench.json`, that device is the console and every other one is aux.
+  Without it, a USB-UART bridge (WCH 1a86, Silicon Labs 10c4, FTDI 0403,
+  Prolific 067b) or Espressif's native USB (303a) is a console, a cellular
+  modem (SIMCom 1e0e, Quectel 2c7c, Telit 1bc7, Qualcomm 05c6) is aux, and
+  anything else is other; an other device beside a console counts as aux.
+- The proxy runs on a console, or on an other device when the slot has no
+  console (a Notecard on its own). It never runs on an aux device.
+- An aux device's add or remove is listed on the slot (`devnodes`,
+  `usb_devices`) and in the activity log, and nothing else: it is not a
+  flap event, does not make the slot present or absent, and does not start,
+  stop or move the proxy.
+- When a console arrives after other devices, the proxy moves to it.
+
+**Verification contract**
+
+| ID | Precondition · stimulus | Expected observation | Must NOT happen | Tier |
+|---|---|---|---|---|
+| FR-046 | VID:PID of a bridge, Espressif, a modem, a Notecard, unknown, with and without `console_usb_id` · classify | console; console; aux; other; other; with the setting only that id is console | A modem port chosen for the proxy | host |
+| FR-046 | Waveshare SIM7670G with the cellular build · reset over the API | Proxy on the CH343 within the native-USB delay; boot banner and L50 in `/api/serial/output`; slot never `flapping` | The proxy on a modem port; `flapping` from the modem's ports | bench |
+
 ---
 
 ## 11. Non-Functional Requirements
@@ -4373,6 +4404,16 @@ by slot number.
   board is present, and is out of date after a week; times are US Eastern
 - FR-043: slots whose board is not an ESP32 (a Notecard, say) show no BOOT/EN
   test or result
+
+### 2026-11-08 — the proxy stays on the board's console
+
+Asked for by the bench's operator: with a cellular board's modem on the same
+USB port, each boot gave the proxy to a modem port and flagged the slot as
+flapping, and the first half-minute of the console log was lost.
+
+- FR-046: a slot's serial devices are classed console, aux or other (by
+  `console_usb_id`, else by vendor); the proxy stays on the console and a
+  modem's ports never count as flapping
 
 ### 2026-11-06 — BOOT/EN pins per slot
 

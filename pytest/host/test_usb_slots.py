@@ -173,3 +173,64 @@ def test_merge_without_a_config_numbers_ports_in_order():
 def test_merge_reports_a_pinned_board_that_is_missing():
     _, notes = us.merge_config(OLD, HUB, {"SLOT1": "00:00"})
     assert any("not found" in n for n in notes)
+
+
+# ── FR-046: the board's console among a slot's serial devices ───────────
+
+CH343 = "1a86:55d3"
+MODEM = "1e0e:9011"
+NOTE = "30a4:0001"
+ESP_JTAG = "303a:1001"
+
+
+@pytest.mark.parametrize("usb_id,console_id,want", [
+    (CH343, None, "console"),
+    ("1A86:55D3", None, "console"),
+    (ESP_JTAG, None, "console"),
+    (MODEM, None, "aux"),
+    ("2c7c:0125", None, "aux"),
+    (NOTE, None, "other"),
+    (None, None, "other"),
+    ("junk", None, "other"),
+    (CH343, CH343, "console"),
+    (ESP_JTAG, CH343, "aux"),
+    (NOTE, CH343, "aux"),
+    (None, CH343, "other"),
+    (CH343, "not-an-id", "console"),
+])
+def test_fr046_device_role(usb_id, console_id, want):
+    assert us.device_role(usb_id, console_id) == want
+
+
+def test_fr046_modem_ports_never_carry_the_proxy():
+    # The Waveshare SIM7670G at boot: four modem ports enumerate before the CH343.
+    ids = {"m0": MODEM, "m1": MODEM, "m2": MODEM, "m3": MODEM}
+    assert us.console_keys(ids) == []
+    ids["ch"] = CH343
+    assert us.console_keys(ids) == ["ch"]
+    assert all(us.is_aux(ids, k) for k in ("m0", "m1", "m2", "m3"))
+    assert not us.is_aux(ids, "ch")
+
+
+def test_fr046_unknown_device_alone_still_gets_the_proxy():
+    ids = {"n": NOTE}
+    assert us.console_keys(ids) == ["n"]
+    assert not us.is_aux(ids, "n")
+    ids["ch"] = CH343
+    assert us.console_keys(ids) == ["ch"]
+    assert us.is_aux(ids, "n")
+
+
+def test_fr046_configured_console_excludes_everything_else():
+    ids = {"j": ESP_JTAG, "ch": CH343, "m": "abcd:0001"}
+    assert us.console_keys(ids, CH343) == ["ch"]
+    assert us.is_aux(ids, "j", CH343)
+    assert us.is_aux(ids, "m", CH343)
+    # The console unplugged: nothing else takes the proxy.
+    assert us.console_keys({"j": ESP_JTAG, "m": "abcd:0001"}, CH343) == []
+
+
+def test_fr046_dual_usb_board_keeps_both_consoles_in_order():
+    ids = {"j": ESP_JTAG, "ch": CH343}
+    assert us.console_keys(ids) == ["j", "ch"]
+    assert not us.is_aux(ids, "j") and not us.is_aux(ids, "ch")
