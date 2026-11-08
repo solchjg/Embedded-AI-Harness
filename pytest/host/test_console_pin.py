@@ -46,6 +46,13 @@ def bench(monkeypatch, tmp_path):
     def stop(s):
         calls.append(("stop", s["devnode"]))
         s.update(running=False, pid=None)
+    # The fake proxy's pid is not a real process: say it is alive (os.kill
+    # on pid 1 succeeds only as root, so the result differed between a root
+    # container and the CI runner), and keep the slot out of the JTAG
+    # auto-detection, which is not what these tests are about.
+    monkeypatch.setattr(portal, "_is_process_alive", lambda pid: pid is not None)
+    slot = portal.slots["_fixed_SLOT2"]
+    slot["gdb_port"] = None
     monkeypatch.setattr(portal, "start_proxy", start)
     monkeypatch.setattr(portal, "stop_proxy", stop)
     monkeypatch.setattr(portal, "_refresh_all_usb_devices", lambda: None)
