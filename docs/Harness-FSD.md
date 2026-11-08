@@ -3492,7 +3492,9 @@ reached the serial log.
   `usb_devices`) and in the activity log, and nothing else: it is not a
   flap event, does not make the slot present or absent, and does not start,
   stop or move the proxy.
-- When a console arrives after other devices, the proxy moves to it.
+- When a console arrives after other devices, the proxy moves to it. When
+  the device the proxy has goes away and another console remains, the proxy
+  moves to that one (it used to stay on the dead node, showing `running`).
 
 **Verification contract**
 

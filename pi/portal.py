@@ -3440,6 +3440,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # Other devnodes still active — update primary if needed
                 if slot["devnode"] == devnode:
                     slot["devnode"] = remaining[0]
+                    # FR-046: the proxy had the node that went; move it,
+                    # or it reads a dead port while the slot shows running.
+                    if slot["running"] and not slot["flapping"]:
+                        def _bg_move(s=slot, lk=lock):
+                            with lk:
+                                if s["running"] and s["devnode"]:
+                                    stop_proxy(s)
+                                    start_proxy(s)
+                        threading.Thread(target=_bg_move, daemon=True).start()
             # Stop debug session if active (preserves _auto_debug_chip
             # so debug auto-restarts on next hotplug add after flash)
             _rm_label = slot.get("label")
