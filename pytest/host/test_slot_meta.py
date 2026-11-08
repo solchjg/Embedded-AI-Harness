@@ -179,3 +179,48 @@ def test_fr044_a_bench_without_wires():
                                bench={"gpio_boot": None, "gpio_en": None})
     assert got["SLOT1"] == default == {"gpio_boot": None, "gpio_en": None}
     assert notes == []
+
+
+# ── FR-045 ────────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("raw,want", [
+    ("1A86:55D3", "1a86:55d3"),
+    (" 1a86:55d3 ", "1a86:55d3"),
+    ("", None),
+    (None, None),
+])
+def test_fr045_clean_console_id(raw, want):
+    assert sm.clean_console_id(raw) == want
+
+
+@pytest.mark.parametrize("raw", ["1a86", "1a86:55d", "1a86-55d3", "zz86:55d3", 0x1a86, ["1a86:55d3"]])
+def test_fr045_console_id_refused(raw):
+    with pytest.raises(ValueError):
+        sm.clean_console_id(raw)
+
+
+@pytest.mark.parametrize("devpath,want", [
+    ("/devices/platform/soc/3f980000.usb/usb1/1-1/1-1.1/1-1.1.1/1-1.1.1.4/"
+     "1-1.1.1.4:1.0/tty/ttyACM0", "1-1.1.1.4"),
+    ("/devices/platform/scb/fd500000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/"
+     "usb1/1-1/1-1.3/1-1.3:1.2/tty/ttyACM2", "1-1.3"),
+    ("/devices/virtual/tty/ttyS0", None),
+    ("", None),
+])
+def test_fr045_usb_device_from_devpath(devpath, want):
+    assert sm.usb_device_from_devpath(devpath) == want
+
+
+CH343 = "1a86:55d3"
+SIM7670 = "1e0e:9011"
+
+
+@pytest.mark.parametrize("pin,vid_pid,other", [
+    (CH343, CH343, False),       # the console
+    (CH343, "1A86:55D3", False),  # case ignored
+    (CH343, SIM7670, True),      # the modem: set aside
+    (CH343, None, False),        # unreadable: kept, never lose the console
+    (None, SIM7670, False),      # unpinned: every device is the slot's
+])
+def test_fr045_is_other_device(pin, vid_pid, other):
+    assert sm.is_other_device(pin, vid_pid) is other

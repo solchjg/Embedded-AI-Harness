@@ -619,6 +619,16 @@ def load_config(path: str) -> dict[str, dict]:
                     sdef.get("board_name"))
             except ValueError as exc:
                 print(f"[portal] {label}: board_name ignored: {exc}", flush=True)
+            # FR-045: the console is the serial device with this VID:PID;
+            # others on the slot's port path (a board's modem) are not.
+            try:
+                slot["_console_id"] = slot_meta.clean_console_id(
+                    sdef.get("console_vid_pid"))
+            except ValueError as exc:
+                print(f"[portal] {label}: {exc}; console not pinned", flush=True)
+            if slot["_console_id"]:
+                print(f"[portal] {label}: console pinned to "
+                      f"{slot['_console_id']}", flush=True)
             result[placeholder_key] = slot
             _global_config["slot_prefixes"].append(
                 {"label": label, "prefix": prefix,
@@ -718,6 +728,8 @@ def _make_slot(slot_key: str, label: str = None, tcp_port: int = None,
         "pid": None,
         "devnode": None,
         "_devnodes": {},  # slot_key → devnode for all active devices on this slot
+        "_console_id": None,   # FR-045: console VID:PID, e.g. "1a86:55d3"
+        "_other_devnodes": {},  # FR-045: slot_key → devnode, not the console
         "seq": 0,
         "last_action": None,
         "last_event_ts": None,
@@ -1043,6 +1055,45 @@ def _make_dynamic_slot(slot_key: str) -> dict:
     return _make_slot(slot_key=slot_key)
 
 
+def _usb_vid_pid(devnode: str | None, devpath: str | None) -> str | None:
+    """'1a86:55d3' for the USB device behind a tty, from sysfs; None if unknown."""
+    usb_device = (slot_meta.usb_device_from_devpath(devpath or "")
+                  or _usb_device_from_devnode(devnode or ""))
+    if not usb_device:
+        return None
+    base = f"/sys/bus/usb/devices/{usb_device}"
+    try:
+        with open(f"{base}/idVendor") as fv, open(f"{base}/idProduct") as fp:
+            return f"{fv.read().strip()}:{fp.read().strip()}".lower()
+    except OSError:
+        return None
+
+
+def _take_other_device(slot: dict, action: str, slot_key: str,
+                       devnode: str | None, devpath: str | None) -> bool:
+    """FR-045: set a non-console device aside; True when *slot_key* is one.
+
+    On a slot pinned to a console VID:PID, a serial device with another
+    VID:PID (the SIM7670G's four CDC ports beside a board's CH343) is
+    recorded in `_other_devnodes` and nothing else: it is not a devnode of
+    the slot, not counted as a flap event, and never starts, stops or
+    restarts the slot's proxy. A remove is recognised by its key, since the
+    device's sysfs entry is gone by then.
+    """
+    if not slot.get("_console_id"):
+        return False
+    others = slot.setdefault("_other_devnodes", {})
+    if action == "remove":
+        return others.pop(slot_key, None) is not None
+    if action != "add":
+        return slot_key in others
+    vid_pid = _usb_vid_pid(devnode, devpath)
+    if not slot_meta.is_other_device(slot["_console_id"], vid_pid):
+        return False
+    others[slot_key] = devnode
+    return True
+
+
 def scan_existing_devices():
     """Scan for already-plugged-in USB serial devices and start proxies.
 
@@ -1093,6 +1144,11 @@ def scan_existing_devices():
             slot = slots[slot_key]
         else:
             slot = slots[slot_key]
+
+        if _take_other_device(slot, "add", slot_key, devnode, devpath):
+            print(f"[portal] boot scan: {slot['label']}: {devnode} is not the "
+                  f"console ({slot['_console_id']}), set aside", flush=True)
+            continue
 
         slot["_devnodes"][slot_key] = devnode
         slot["present"] = True
@@ -1324,6 +1380,9 @@ def _slot_info(slot: dict) -> dict:
     info["recovering"] = slot["_recovering"]
     info["recover_retries"] = slot["_recover_retries"]
     info["devnodes"] = list(slot.get("_devnodes", {}).values())
+    # FR-045: the console pin, and the serial devices it set aside.
+    info["console_vid_pid"] = slot.get("_console_id")
+    info["other_devnodes"] = list(slot.get("_other_devnodes", {}).values())
     # Two different facts, deliberately separate: `has_gpio` says pins are
     # configured, `gpio_wired` says a measurement found them connected to
     # this board. Collapsing them is what let recovery claim a capability
@@ -3144,6 +3203,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
         else:
             slot = slots[slot_key]
         lock = slot["_lock"]
+
+        # FR-045: another device on a slot pinned to its console changes
+        # nothing about the slot: no flap event, no proxy restart.
+        if _take_other_device(slot, action, slot_key, devnode, devpath):
+            _refresh_all_usb_devices()
+            label = slot["label"] or slot_key[-20:]
+            print(f"[portal] hotplug: {action} {label} {devnode} ignored "
+                  f"(not the console {slot['_console_id']})", flush=True)
+            self._send_json({
+                "ok": True, "slot_key": slot_key, "seq": seq_counter,
+                "accepted": False, "other_device": True,
+            })
+            return
 
         # Update event bookkeeping (always, even for unknown slots)
         seq_counter += 1

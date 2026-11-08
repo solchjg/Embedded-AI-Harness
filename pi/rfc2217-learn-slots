@@ -16,6 +16,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -157,6 +158,10 @@ def main():
     ap.add_argument("--pin", action="append", default=[], metavar="LABEL=SERIAL",
                     help="put LABEL on the port of the board with this USB serial "
                          "(an ESP32-S3's is its MAC), e.g. SLOT1=48:27:E2:EA:48:3C")
+    ap.add_argument("--console", action="append", default=[], metavar="LABEL=VID:PID",
+                    help="make the serial device with this USB VID:PID the slot's "
+                         "console and ignore the others on its port path, e.g. "
+                         "SLOT2=1a86:55d3 (a CH343 beside a modem); LABEL= removes it")
     ap.add_argument("--json", action="store_true",
                     help="print only the resulting config (for scripts)")
     args = ap.parse_args()
@@ -167,6 +172,15 @@ def main():
         if not sep or not label or not serial:
             ap.error(f"--pin wants LABEL=SERIAL, got {item!r}")
         pins[label] = serial
+
+    consoles = {}
+    for item in args.console:
+        label, sep, vid_pid = item.partition("=")
+        vid_pid = vid_pid.strip().lower()
+        if (not sep or not label
+                or (vid_pid and not re.fullmatch(r"[0-9a-f]{4}:[0-9a-f]{4}", vid_pid))):
+            ap.error(f"--console wants LABEL=VID:PID (e.g. SLOT2=1a86:55d3), got {item!r}")
+        consoles[label] = vid_pid
 
     if not args.json:
         print(f"Raspberry Pi model: {pi_model()}\n")
@@ -188,7 +202,7 @@ def main():
             print(f"cannot read {args.merge}: {exc}", file=sys.stderr)
             sys.exit(1)
 
-    config, notes = usb_slots.merge_config(existing, learned, pins)
+    config, notes = usb_slots.merge_config(existing, learned, pins, consoles)
     if args.json:
         for n in notes:
             print(f"note: {n}", file=sys.stderr)
