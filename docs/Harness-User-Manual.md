@@ -236,7 +236,7 @@ Then edit `/etc/rfc2217/testbench.json`:
 | `slots[].gpio_boot` / `gpio_en` | This slot's own BOOT/EN pins (BCM 16 – 27), so two boards can be wired at once. `null` means no wire on that line. A pin a slot names is never driven for another slot. |
 | `slots[].label` | Slot name shown in the UI |
 | `slots[].usb_prefix` | Port path of the slot's USB port, e.g. `"0:1.2"` (a Pi port) or `"0:1.1.2"` (port 2 of a hub on Pi port 1). `rfc2217-learn-slots` prints one per occupied port. Auto-detected if omitted. |
-| `slots[].console_usb_id` | VID:PID of the board's console, e.g. `"1a86:55d3"` for a CH343. Set it on a slot whose board brings other serial devices (a cellular modem's ports): the proxy then stays on this one, and the others never count as flapping (FR-046). Without it, a known USB-UART bridge or Espressif's USB is preferred and known modems are ignored. |
+| `slots[].console_usb_id` | VID:PID of the board's console, e.g. `"1a86:55d3"` for a CH343. `sudo bash pi/update-bench.sh --console SLOT2=1a86:55d3` sets it (`SLOT2=` clears it). Set it on a slot whose board brings other serial devices (a cellular modem's ports): the proxy then stays on this one, and the others never count as flapping (FR-046). Without it, a known USB-UART bridge or Espressif's USB is preferred and known modems are ignored. |
 | `slots[].tcp_port` / `gdb_port` / `openocd_telnet_port` | Default to `4000+i` / `3332+i` / `4443+i` |
 | `debug_probes[]` | ESP-Prog / FT2232H probe definitions. Omit if using USB JTAG only. |
 

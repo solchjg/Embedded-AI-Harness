@@ -5,9 +5,11 @@
 #   sudo bash pi/update-bench.sh                         # pull, install, re-learn slots
 #   sudo bash pi/update-bench.sh --pin SLOT1=48:27:E2:EA:48:3C
 #   sudo bash pi/update-bench.sh --no-learn              # code only, keep testbench.json
+#   sudo bash pi/update-bench.sh --console SLOT2=1a86:55d3
 # Other options: --no-pull (install the checkout as it is), --occupied-only (no
 # slots for empty hub ports), --yes (write the config without asking), --force
-# (go ahead although a slot is in a debug session).
+# (go ahead although a slot is in a debug session), --console LABEL=VID:PID
+# (that slot's proxy stays on this USB device; LABEL= clears it, FR-046).
 #
 # Steps, each shown before it runs:
 #   1. Refuse while a slot is in a debug session (the restart would cut it),
@@ -19,7 +21,9 @@
 #      keeping labels, TCP/GDB ports, GPIO pins and debug probes. --pin keeps
 #      a label on a given board wherever it is plugged. Shows the diff, asks,
 #      backs up the old file as testbench.json.<time>.bak, writes the new one.
-#   5. Restarts the portal and prints every slot: port, device, chip.
+#   5. --console: sets console_usb_id on those slots in testbench.json, with
+#      the same diff, question and backup, and restarts the portal.
+#   6. Prints every slot: port, device, chip.
 #
 # Use it after changing hubs or cables, or after merging harness changes.
 set -euo pipefail
@@ -28,6 +32,7 @@ CONFIG=/etc/rfc2217/testbench.json
 API=http://127.0.0.1:8080/api/devices
 PULL=1 LEARN=1 YES=0 FORCE=0 EMPTY=1
 PINS=()
+CONSOLES=()
 
 usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit "${1:-0}"; }
 
@@ -35,6 +40,8 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --pin)       PINS+=(--pin "$2"); shift ;;
         --pin=*)     PINS+=(--pin "${1#--pin=}") ;;
+        --console)   CONSOLES+=("$2"); shift ;;
+        --console=*) CONSOLES+=("${1#--console=}") ;;
         --no-pull)   PULL=0 ;;
         --no-learn)  LEARN=0 ;;
         --occupied-only) EMPTY=0 ;;
@@ -87,6 +94,34 @@ wait_portal() {
     return 1
 }
 
+# Show the change from $CONFIG to the file $1, ask, back up, write, restart.
+apply_config() {
+    local new="$1"
+    if [ -f "$CONFIG" ] && cmp -s <(python3 -m json.tool "$CONFIG") <(python3 -m json.tool "$new"); then
+        echo "testbench.json unchanged"
+        return 0
+    fi
+    if [ -f "$CONFIG" ]; then
+        diff -u "$CONFIG" "$new" || true
+    else
+        cat "$new"
+    fi
+    if confirm "Write this to $CONFIG?"; then
+        if [ -f "$CONFIG" ]; then
+            bak="$CONFIG.$(date +%Y%m%d-%H%M%S).bak"
+            cp -p "$CONFIG" "$bak"
+            echo "old config kept as $bak"
+        fi
+        mkdir -p "$(dirname "$CONFIG")"
+        install -m 644 "$new" "$CONFIG"
+        step "Restarting the portal"
+        systemctl restart rfc2217-portal
+        wait_portal
+    else
+        echo "not written"
+    fi
+}
+
 # 1. Nothing may be mid-debug-session: the restart would cut it.
 step "Checking for slots in use"
 busy=$(curl -s -m 5 "$API" | python3 -c '
@@ -126,32 +161,38 @@ if [ "$LEARN" = 1 ]; then
     new=$(mktemp)
     trap 'rm -f "$new"' EXIT
     rfc2217-learn-slots "${learn_args[@]}" >"$new"
-    if [ -f "$CONFIG" ] && cmp -s <(python3 -m json.tool "$CONFIG") <(python3 -m json.tool "$new"); then
-        echo "testbench.json already matches the ports: unchanged"
-    else
-        if [ -f "$CONFIG" ]; then
-            diff -u "$CONFIG" "$new" || true
-        else
-            cat "$new"
-        fi
-        if confirm "Write this to $CONFIG?"; then
-            if [ -f "$CONFIG" ]; then
-                bak="$CONFIG.$(date +%Y%m%d-%H%M%S).bak"
-                cp -p "$CONFIG" "$bak"
-                echo "old config kept as $bak"
-            fi
-            mkdir -p "$(dirname "$CONFIG")"
-            install -m 644 "$new" "$CONFIG"
-            step "Restarting the portal"
-            systemctl restart rfc2217-portal
-            wait_portal
-        else
-            echo "not written"
-        fi
-    fi
+    apply_config "$new"
 fi
 
-# 5. Result. Chip detection runs in the background after a restart, so give
+# 5. Consoles (FR-046): which USB device on a slot carries its proxy.
+if [ ${#CONSOLES[@]} -gt 0 ]; then
+    step "Setting slot consoles: ${CONSOLES[*]}"
+    [ -f "$CONFIG" ] || { echo "no $CONFIG to change" >&2; exit 1; }
+    cnew=$(mktemp)
+    trap 'rm -f "${new:-}" "$cnew"' EXIT
+    python3 - "$CONFIG" "${CONSOLES[@]}" >"$cnew" <<'PY'
+import json, re, sys
+path, args = sys.argv[1], sys.argv[2:]
+cfg = json.load(open(path))
+for arg in args:
+    label, eq, uid = arg.partition("=")
+    uid = uid.strip().lower()
+    if not eq or (uid and not re.fullmatch(r"[0-9a-f]{4}:[0-9a-f]{4}", uid)):
+        sys.exit(f"--console {arg}: want LABEL=vvvv:pppp, or LABEL= to clear")
+    slot = next((s for s in cfg.get("slots", []) if s.get("label") == label), None)
+    if slot is None:
+        sys.exit(f"--console {arg}: no slot {label} in {path}")
+    if uid:
+        slot["console_usb_id"] = uid
+    else:
+        slot.pop("console_usb_id", None)
+json.dump(cfg, sys.stdout, indent=2)
+print()
+PY
+    apply_config "$cnew"
+fi
+
+# 6. Result. Chip detection runs in the background after a restart, so give
 # it a moment before reporting.
 step "Slots"
 sleep 5
