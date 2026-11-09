@@ -12,7 +12,10 @@ the JSON files and passes the records in.
   board is there or the measurement is older than its maximum age.
 - FR-044: each slot can have its own BOOT/EN pair, so two boards can be wired
   at once without a reset of one reaching the other.
-- FR-045: a native-USB ESP32 shows an EN reset by leaving the USB bus, not by
+- FR-045: a slot can pin its console to one USB VID:PID, so other serial
+  devices on the same port path (a board's modem, say) are neither the
+  console nor a reason to restart it.
+- FR-046: a native-USB ESP32 shows an EN reset by leaving the USB bus, not by
   a ROM banner the bench could read, so the wiring test counts either.
 """
 import re
@@ -204,6 +207,78 @@ def slot_gpio_pins(bench: dict, slot_defs: list[dict],
 
 # FR-045 ───────────────────────────────────────────────────────────────────
 
+# Cellular modems whose CDC ports sit beside a board's console: SIMCom,
+# Quectel, Telit, Qualcomm. Their ports are never a console, pin or no pin.
+MODEM_VIDS = frozenset({"1e0e", "2c7c", "1bc7", "05c6"})
+# USB-UART bridges (WCH, Silicon Labs, FTDI, Prolific). A bridge's tty can be
+# opened at once; only Espressif's native USB needs the boot delay.
+BRIDGE_VIDS = frozenset({"1a86", "10c4", "0403", "067b"})
+
+_VID_PID = re.compile(r"^([0-9a-f]{4}):([0-9a-f]{4})$")
+_USB_DEVICE = re.compile(r"^\d+-\d+(?:\.\d+)*$")
+
+
+def clean_console_id(value) -> str | None:
+    """FR-045: a slot's `console_vid_pid` from testbench.json, normalised.
+
+    "1A86:55D3" -> "1a86:55d3"; None or "" -> None (no pin). Anything else is
+    refused with ValueError, so a typo is logged rather than silently pinning
+    the console to nothing.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"console_vid_pid must be a string, got {value!r}")
+    v = value.strip().lower()
+    if not v:
+        return None
+    if not _VID_PID.match(v):
+        raise ValueError(f"console_vid_pid {value!r} is not VID:PID "
+                         f"(four hex digits each, e.g. 1a86:55d3)")
+    return v
+
+
+def usb_device_from_devpath(devpath: str) -> str | None:
+    """'/devices/.../1-1.1.1.4/1-1.1.1.4:1.0/tty/ttyACM0' -> '1-1.1.1.4'.
+
+    The USB device is the last path element that is a sysfs device name, not
+    an interface ('1-1.1.1.4:1.0'), a root hub ('usb1') or the tty itself.
+    """
+    for part in reversed((devpath or "").split("/")):
+        if _USB_DEVICE.match(part):
+            return part
+    return None
+
+
+def is_other_device(console_id: str | None, vid_pid: str | None) -> bool:
+    """FR-045: is a serial device with *vid_pid* not its slot's console?
+
+    On a pinned slot, true when the device's VID:PID is known and differs. On
+    an unpinned slot, true only for a known modem vendor (MODEM_VIDS). A
+    device whose VID:PID could not be read is always the slot's, so a failed
+    sysfs read never loses the console.
+    """
+    if not vid_pid:
+        return False
+    vid_pid = vid_pid.lower()
+    if console_id:
+        return vid_pid != console_id
+    return vid_pid.split(":")[0] in MODEM_VIDS
+
+
+def is_console(console_id: str | None, vid_pid: str | None) -> bool:
+    """FR-045: is this the pinned console itself? (False on an unpinned slot.)"""
+    return bool(console_id and vid_pid and vid_pid.lower() == console_id)
+
+
+def needs_boot_delay(vid_pid: str | None) -> bool:
+    """Wait before opening this ttyACM? Not for a USB-UART bridge: the delay
+    keeps a native-USB ESP32 out of download mode, and on a bridge it only
+    loses the first lines after a reset (the ROM banner)."""
+    return not (vid_pid and vid_pid.split(":")[0].lower() in BRIDGE_VIDS)
+
+# FR-046 ───────────────────────────────────────────────────────────────────
+
 ROM_BANNER = re.compile(r"ESP-ROM:|rst:0x[0-9a-fA-F]+|boot:0x[0-9a-fA-F]+")
 
 
@@ -215,7 +290,7 @@ USB_RESET_WINDOW_S = 1.5
 
 def reset_evidence(since: float, serial_lines, hotplug_events,
                    usb_window_s: float = USB_RESET_WINDOW_S) -> str | None:
-    """FR-045: did the board in a slot reset after *since*, and how is it known?
+    """FR-046: did the board in a slot reset after *since*, and how is it known?
 
     *serial_lines* are {"ts", "text"} entries from the slot's serial buffer;
     *hotplug_events* are (ts, action) pairs for the slot. Returns "banner"
@@ -236,5 +311,5 @@ def reset_evidence(since: float, serial_lines, hotplug_events,
 
 
 def returned_after(since: float, hotplug_events) -> bool:
-    """FR-045: has the board come back on USB (an add) after *since*?"""
+    """FR-046: has the board come back on USB (an add) after *since*?"""
     return any(ts > since and action == "add" for ts, action in hotplug_events)

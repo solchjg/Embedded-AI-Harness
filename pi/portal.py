@@ -619,6 +619,16 @@ def load_config(path: str) -> dict[str, dict]:
                     sdef.get("board_name"))
             except ValueError as exc:
                 print(f"[portal] {label}: board_name ignored: {exc}", flush=True)
+            # FR-045: the console is the serial device with this VID:PID;
+            # others on the slot's port path (a board's modem) are not.
+            try:
+                slot["_console_id"] = slot_meta.clean_console_id(
+                    sdef.get("console_vid_pid"))
+            except ValueError as exc:
+                print(f"[portal] {label}: {exc}; console not pinned", flush=True)
+            if slot["_console_id"]:
+                print(f"[portal] {label}: console pinned to "
+                      f"{slot['_console_id']}", flush=True)
             result[placeholder_key] = slot
             _global_config["slot_prefixes"].append(
                 {"label": label, "prefix": prefix,
@@ -718,6 +728,8 @@ def _make_slot(slot_key: str, label: str = None, tcp_port: int = None,
         "pid": None,
         "devnode": None,
         "_devnodes": {},  # slot_key → devnode for all active devices on this slot
+        "_console_id": None,   # FR-045: console VID:PID, e.g. "1a86:55d3"
+        "_other_devnodes": {},  # FR-045: slot_key → devnode, not the console
         "seq": 0,
         "last_action": None,
         "last_event_ts": None,
@@ -733,7 +745,7 @@ def _make_slot(slot_key: str, label: str = None, tcp_port: int = None,
         "_gpio_wiring": None,  # last BOOT/EN measurement record (FR-042)
         "_jtag_slot": None,  # slot label providing JTAG (own or probe)
         "_serial_buf": collections.deque(maxlen=SERIAL_BUF_MAXLEN),
-        # FR-045: recent (ts, action) hotplug events, so the BOOT/EN test can
+        # FR-046: recent (ts, action) hotplug events, so the BOOT/EN test can
         # see a native-USB board leave the bus when EN resets it.
         "_hotplug_log": collections.deque(maxlen=32),
         "_gpio_testing": False,
@@ -1047,6 +1059,45 @@ def _make_dynamic_slot(slot_key: str) -> dict:
     return _make_slot(slot_key=slot_key)
 
 
+def _usb_vid_pid(devnode: str | None, devpath: str | None) -> str | None:
+    """'1a86:55d3' for the USB device behind a tty, from sysfs; None if unknown."""
+    usb_device = (slot_meta.usb_device_from_devpath(devpath or "")
+                  or _usb_device_from_devnode(devnode or ""))
+    if not usb_device:
+        return None
+    base = f"/sys/bus/usb/devices/{usb_device}"
+    try:
+        with open(f"{base}/idVendor") as fv, open(f"{base}/idProduct") as fp:
+            return f"{fv.read().strip()}:{fp.read().strip()}".lower()
+    except OSError:
+        return None
+
+
+def _take_other_device(slot: dict, action: str, slot_key: str,
+                       devnode: str | None, devpath: str | None
+                       ) -> tuple[bool, str | None]:
+    """FR-045: set a non-console device aside.
+
+    Returns (aside, vid_pid). A serial device that is not the slot's console
+    (on a pinned slot any other VID:PID; on any slot a known modem vendor,
+    such as the SIM7670G's four CDC ports beside a board's CH343) is recorded
+    in `_other_devnodes` and nothing else: it is not a devnode of the slot,
+    not counted as a flap event, and never starts, stops or restarts the
+    slot's proxy. A remove is recognised by its key, since the device's
+    sysfs entry is gone by then.
+    """
+    others = slot.setdefault("_other_devnodes", {})
+    if action == "remove":
+        return others.pop(slot_key, None) is not None, None
+    if action != "add":
+        return slot_key in others, None
+    vid_pid = _usb_vid_pid(devnode, devpath)
+    if not slot_meta.is_other_device(slot.get("_console_id"), vid_pid):
+        return False, vid_pid
+    others[slot_key] = devnode
+    return True, vid_pid
+
+
 def scan_existing_devices():
     """Scan for already-plugged-in USB serial devices and start proxies.
 
@@ -1098,10 +1149,17 @@ def scan_existing_devices():
         else:
             slot = slots[slot_key]
 
+        aside, vid_pid = _take_other_device(slot, "add", slot_key, devnode, devpath)
+        if aside:
+            print(f"[portal] boot scan: {slot['label']}: {devnode} ({vid_pid}) "
+                  f"is not the console, set aside", flush=True)
+            continue
+
         slot["_devnodes"][slot_key] = devnode
         slot["present"] = True
-        if not slot["devnode"]:
-            slot["devnode"] = devnode  # first devnode becomes primary
+        if (not slot["devnode"]
+                or slot_meta.is_console(slot.get("_console_id"), vid_pid)):
+            slot["devnode"] = devnode  # first devnode, or the pinned console
         slot["state"] = STATE_IDLE
         if slot["tcp_port"]:
             slot["url"] = f"rfc2217://{host_ip}:{slot['tcp_port']}"
@@ -1328,6 +1386,9 @@ def _slot_info(slot: dict) -> dict:
     info["recovering"] = slot["_recovering"]
     info["recover_retries"] = slot["_recover_retries"]
     info["devnodes"] = list(slot.get("_devnodes", {}).values())
+    # FR-045: the console pin, and the serial devices it set aside.
+    info["console_vid_pid"] = slot.get("_console_id")
+    info["other_devnodes"] = list(slot.get("_other_devnodes", {}).values())
     # Two different facts, deliberately separate: `has_gpio` says pins are
     # configured, `gpio_wired` says a measurement found them connected to
     # this board. Collapsing them is what let recovery claim a capability
@@ -2481,7 +2542,7 @@ def _save_slot_name(label: str, name: str | None) -> bool:
 
 
 def _wait_for_reset(slot: dict, since: float, timeout: float) -> str | None:
-    """FR-045: wait for a ROM banner or the board leaving USB after *since*."""
+    """FR-046: wait for a ROM banner or the board leaving USB after *since*."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         how = slot_meta.reset_evidence(since, list(slot.get("_serial_buf") or []),
@@ -2493,7 +2554,7 @@ def _wait_for_reset(slot: dict, since: float, timeout: float) -> str | None:
 
 
 def _wait_for_return(slot: dict, since: float, timeout: float) -> bool:
-    """FR-045: wait for a board that left USB after *since* to come back."""
+    """FR-046: wait for a board that left USB after *since* to come back."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if (slot_meta.returned_after(since, list(slot.get("_hotplug_log") or []))
@@ -2581,7 +2642,7 @@ def test_gpio_wiring(slot: dict) -> dict:
 
     Returns {ok, en_wired, boot_wired, detail}. Leaves the board running.
 
-    FR-045: a reset shows as a ROM banner on serial (a USB-UART bridge board)
+    FR-046: a reset shows as a ROM banner on serial (a USB-UART bridge board)
     or as the board leaving USB (a native-USB ESP32, whose banner goes out
     while the host is not connected). While the test runs it owns the port:
     a hotplug 'add' does not restart the proxy under it.
@@ -3198,6 +3259,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             slot = slots[slot_key]
         lock = slot["_lock"]
 
+        # FR-045: another device on a slot pinned to its console changes
+        # nothing about the slot: no flap event, no proxy restart.
+        aside, vid_pid = _take_other_device(slot, action, slot_key, devnode, devpath)
+        if aside:
+            _refresh_all_usb_devices()
+            label = slot["label"] or slot_key[-20:]
+            print(f"[portal] hotplug: {action} {label} {devnode} ignored "
+                  f"(not the console)", flush=True)
+            self._send_json({
+                "ok": True, "slot_key": slot_key, "seq": seq_counter,
+                "accepted": False, "other_device": True,
+            })
+            return
+
         # Update event bookkeeping (always, even for unknown slots)
         seq_counter += 1
         slot["seq"] = seq_counter
@@ -3241,7 +3316,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         # -- Flap detection --
         now = time.time()
-        # FR-045: the resets the BOOT/EN test causes are not flapping.
+        # FR-046: the resets the BOOT/EN test causes are not flapping.
         if not slot.get("_gpio_testing"):
             slot["_event_times"].append(now)
         # Prune events older than window
@@ -3291,6 +3366,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # name. Only a portal restart cleared it.
             if not slot["devnode"] or not os.path.exists(slot["devnode"]):
                 slot["devnode"] = devnode
+            # FR-045: the pinned console takes the proxy whatever came first
+            # (a device whose VID:PID could not be read, say).
+            if slot_meta.is_console(slot.get("_console_id"), vid_pid):
+                slot["devnode"] = devnode
             if slot["tcp_port"]:
                 slot["url"] = f"rfc2217://{host_ip}:{slot['tcp_port']}"
             if not slot["flapping"]:
@@ -3301,16 +3380,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 # Start proxy in a background thread so we don't block the
                 # HTTP response for the settle + port-listen check.
-                def _bg_start(s=slot, lk=lock, dn=devnode):
+                def _bg_start(s=slot, lk=lock, dn=devnode, vp=vid_pid):
                     # Native USB (ttyACM): delay before opening port so the
-                    # chip boots past the download-mode-sensitive phase.
-                    if dn and "ttyACM" in dn:
+                    # chip boots past the download-mode-sensitive phase. A
+                    # USB-UART bridge on cdc_acm (CH343) needs no delay, and
+                    # the delay would cost it the ROM banner after a reset.
+                    if dn and "ttyACM" in dn and slot_meta.needs_boot_delay(vp):
                         time.sleep(NATIVE_USB_BOOT_DELAY_S)
                     with lk:
                         if s["flapping"] or s["_recovering"]:
                             return  # Recovery in progress
                         if s.get("_gpio_testing"):
-                            return  # FR-045: the wiring test owns the port
+                            return  # FR-046: the wiring test owns the port
                         # If proxy is already running on a different devnode,
                         # don't restart — this hotplug is for the JTAG interface
                         # which doesn't need a proxy.
@@ -3414,6 +3495,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # Other devnodes still active — update primary if needed
                 if slot["devnode"] == devnode:
                     slot["devnode"] = next(iter(slot["_devnodes"].values()))
+                    # FR-045: the proxy had the node that went; reopen it on
+                    # the one that remains, or it reads a dead port while
+                    # the slot shows running.
+                    if slot["running"] and not slot["flapping"]:
+                        def _bg_move(s=slot, lk=lock):
+                            with lk:
+                                if s["running"] and s["devnode"]:
+                                    stop_proxy(s)
+                                    start_proxy(s)
+                        threading.Thread(target=_bg_move, daemon=True).start()
             # Stop debug session if active (preserves _auto_debug_chip
             # so debug auto-restarts on next hotplug add after flash)
             _rm_label = slot.get("label")
