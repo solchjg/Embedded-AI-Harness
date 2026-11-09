@@ -3485,6 +3485,24 @@ slot then has no way to know which one is the console.
 - `rfc2217-learn-slots --console LABEL=VID:PID` (and `update-bench.sh
   --console`) sets the pin; `LABEL=` removes it. Re-learning keeps it.
 
+### FR-046 — The BOOT/EN Test Sees a Native-USB Reset
+
+An ESP32-S3 or -C3 on its own USB-Serial/JTAG leaves the USB bus when EN
+resets it, and its ROM banner goes out before the host has reopened the port.
+A test that waits for the banner reports such a board "not wired" whatever the
+wiring, and then never tests BOOT.
+
+- After the EN pulse, the test shall count as a reset either a ROM banner on
+  serial or the board leaving USB (a hotplug `remove`) within 1.5 s of the
+  pulse; a later removal (a board going to deep sleep on its own) does not
+  count. The result's `detail` says which was seen.
+- Before the download-mode check, and after the closing release, the test
+  shall wait up to 10 s for a native-USB board to come back on USB, and use
+  the node it came back on.
+- While the test runs, a hotplug `add` on its slot shall not restart the
+  serial proxy or the debug probe, and its events shall not count towards
+  flap detection. The test restarts the proxy when it ends.
+
 **Verification contract**
 
 | ID | Precondition · stimulus | Expected observation | Must NOT happen | Tier |
@@ -3496,6 +3514,8 @@ slot then has no way to know which one is the console.
 | FR-045 | ttyACM of a USB-UART bridge, of Espressif native USB, unidentified · open | At once; after the boot delay; after the boot delay | A bridge's ROM banner lost to the delay | host |
 | FR-045 | A slot with a console pin in `testbench.json` · re-learn slots; `--console` set and cleared | The pin kept; set; removed | The pin lost on re-learn | host |
 | FR-045 | SIM7670G board pinned to 1a86:55d3 · firmware powers the modem | The proxy keeps serving the CH343 from reset on; modem ports under `other_devnodes`; no flapping | The console moving to a modem port; a proxy restart when the modem's ports appear | bench |
+| FR-046 | Serial lines and hotplug events around a pulse · judge | Banner after → `banner`; `remove` within 1.5 s → `usb`; banner or events before, a lone `add`, a `remove` after 5 s → none | A board that slept on its own counted as reset | host |
+| FR-046 | Native-USB ESP32-S3 wired to its slot's pair · BOOT/EN test | `en_wired` and `boot_wired` true; the board back in its slot, running, proxy up | "EN pulse produced no reset" on a wired board; the slot left flapping | bench |
 | FR-044 | Bench-wide pair; slots with none, their own pair, `null`, one key, a repeated pin, a pin outside 16 – 27, BOOT = EN · resolve | Bench pair; own pair; unwired; that key only; first slot keeps it; dropped; unwired; a log line for each drop | Two slots driving one pin; the bench-wide pair driven for a slot after another slot took it | host |
 | FR-044 | A slot with its own pins in `testbench.json` · re-learn slots | The pins kept on that slot | Per-slot pins lost | host |
 | FR-044 | Two ESP32 boards wired to their own pairs · BOOT/EN test on each | Each passes; the other board's serial shows no reset | A reset on the board in the other slot | bench |
@@ -4417,6 +4437,15 @@ slot drove the same BCM 17/18, so a reset meant for one board reached the other.
 - FR-044: each slot in `testbench.json` can name its own `gpio_boot`/`gpio_en`;
   the bench-wide pair goes only to slots that name none and is never shared
   with a slot that took it for itself
+
+### 2026-11-06 — the BOOT/EN test on native-USB boards
+
+Reported from the bench: a T-SIM7080G-S3 wired three times over still tested
+"EN not wired". Its ROM banner goes out while its USB is down after the reset.
+
+- FR-046: the wiring test counts the board leaving USB right after the EN
+  pulse as a reset, waits for it to come back before the download-mode check,
+  and keeps its own resets out of proxy restarts and flap detection
 
 ### 2026-11-08 — console pinned to a USB VID:PID
 

@@ -15,6 +15,8 @@ the JSON files and passes the records in.
 - FR-045: a slot can pin its console to one USB VID:PID, so other serial
   devices on the same port path (a board's modem, say) are neither the
   console nor a reason to restart it.
+- FR-046: a native-USB ESP32 shows an EN reset by leaving the USB bus, not by
+  a ROM banner the bench could read, so the wiring test counts either.
 """
 import re
 from datetime import datetime
@@ -274,3 +276,40 @@ def needs_boot_delay(vid_pid: str | None) -> bool:
     keeps a native-USB ESP32 out of download mode, and on a bridge it only
     loses the first lines after a reset (the ROM banner)."""
     return not (vid_pid and vid_pid.split(":")[0].lower() in BRIDGE_VIDS)
+
+# FR-046 ───────────────────────────────────────────────────────────────────
+
+ROM_BANNER = re.compile(r"ESP-ROM:|rst:0x[0-9a-fA-F]+|boot:0x[0-9a-fA-F]+")
+
+
+# A native-USB board drops off the bus within milliseconds of EN going low; a
+# removal later than this is the board's own doing (deep sleep, a crash), not
+# the pulse's.
+USB_RESET_WINDOW_S = 1.5
+
+
+def reset_evidence(since: float, serial_lines, hotplug_events,
+                   usb_window_s: float = USB_RESET_WINDOW_S) -> str | None:
+    """FR-046: did the board in a slot reset after *since*, and how is it known?
+
+    *serial_lines* are {"ts", "text"} entries from the slot's serial buffer;
+    *hotplug_events* are (ts, action) pairs for the slot. Returns "banner"
+    for a ROM boot banner on serial (a board behind a USB-UART bridge),
+    "usb" for the board leaving the USB bus within *usb_window_s* of *since*
+    (a native-USB ESP32, whose USB-Serial/JTAG goes down with the chip and
+    comes back after the ROM has printed its banner to nobody), or None. A
+    later removal is not counted: a board going to deep sleep on its own must
+    not pass for a wired EN.
+    """
+    for entry in serial_lines:
+        if entry.get("ts", 0) > since and ROM_BANNER.search(entry.get("text", "")):
+            return "banner"
+    for ts, action in hotplug_events:
+        if since < ts <= since + usb_window_s and action == "remove":
+            return "usb"
+    return None
+
+
+def returned_after(since: float, hotplug_events) -> bool:
+    """FR-046: has the board come back on USB (an add) after *since*?"""
+    return any(ts > since and action == "add" for ts, action in hotplug_events)

@@ -274,6 +274,78 @@ match the wiring documented in sections [11](#11-rf-signal-generator) and
 > ssh pi@$BENCH 'sudo cp /tmp/portal.py /usr/local/bin/rfc2217-portal && sudo systemctl restart rfc2217-portal'
 > ```
 
+### 2.7 Adding a board to the bench
+
+Each board keeps its slot by its USB serial number, so a board found again
+after a re-plug, a hub change or an update lands in the same slot.
+
+1. **Plug it in and read its serial.** On the Pi:
+
+   ```bash
+   sudo rfc2217-learn-slots
+   ```
+
+   It lists each serial device with `model`, `serial` and `prefix`. Use it only
+   to read serials: the "Suggested testbench.json" it prints starts from
+   nothing, renumbers the slots and drops per-slot GPIO pins, so do not install
+   it on a bench that already has a config.
+
+   | Board's USB | `model` shows | `serial` is |
+   |-------------|---------------|-------------|
+   | ESP32-S3 / C3 native USB-Serial/JTAG | `USB_JTAG_serial_debug_unit` | its MAC, e.g. `48:27:E2:EA:48:3C` |
+   | CH343 / CH340 bridge | `USB_Single_Serial` (or similar) | the chip's serial, e.g. `5B91031846` |
+   | CP210x / FTDI bridge | the bridge's name | the bridge's serial |
+   | Blues Notecard | `Notecard` | `NOTE` (only one Notecard per bench can be pinned this way) |
+
+2. **Pin every board to its slot** and update, from the harness clone on the
+   Pi (the folder that holds `pi/`; `find ~ -maxdepth 4 -name update-bench.sh`
+   finds it):
+
+   ```bash
+   cd ~/Embedded-AI-Harness
+   sudo bash pi/update-bench.sh --pin SLOT1=48:27:E2:EA:48:3C --pin SLOT2=5B91031846 --pin SLOT4=NOTE
+   ```
+
+   Pin each board that is plugged in now, every time: a slot that is not
+   pinned can be given to another port. A board that is unplugged is left
+   out; its slot keeps its port. Type the serials as printed, without angle
+   brackets. The script shows the change to `testbench.json` and asks first;
+   check that every slot's `gpio_boot`/`gpio_en` lines are still there.
+
+3. **Name it.** On the dashboard, click "name this board" on the slot card
+   (FR-041).
+
+4. **Check the slot card.** It shows one serial device for the board. A board
+   with its own USB hub (a modem board, say) can put more devices on the slot:
+   a modem's USB shows as an extra entry such as `QualComm Compo`. Route it away
+   from the USB-C port with the board's switch when the bench does not need it.
+
+5. **Decide on BOOT/EN wires.**
+
+   - **USB-UART bridge with an auto-program circuit** (two transistors from
+     DTR/RTS to EN and GPIO 0, as on most dev boards with a CH34x, CP210x or
+     FTDI): no wires. The bench resets the board and enters download mode
+     through the bridge, and the port stays up while the ESP32 deep-sleeps.
+     Check it with a reset that returns the ROM banner (`ESP-ROM:`, `rst:0x1`):
+
+     ```bash
+     curl -X POST http://$BENCH:8080/api/serial/reset \
+       -H 'Content-Type: application/json' -d '{"slot":"SLOT2"}'
+     ```
+
+   - **Native USB-Serial/JTAG** (ESP32-S3/C3 on its own USB): the port drops
+     whenever the chip deep-sleeps, crashes its USB or is held in reset, so
+     wires are what reset or flash it then. Find EN and GPIO 0 on the board's
+     schematic: GPIO 0 is often on a header, EN often only on the reset key or
+     its capacitor. Wire them through 1 kΩ to a free pair
+     ([GPIO wiring](#gpio-wiring-optional)), give the slot that pair in
+     `testbench.json`, restart the portal and run the BOOT/EN test with the
+     board awake. Board pins named `IO17`/`IO18` are the ESP32's own GPIOs, not
+     the Pi's BCM 17/18.
+
+   - **Not an ESP32** (a Notecard): nothing to wire; the slot offers no BOOT/EN
+     test (FR-043).
+
 ---
 
 ## 3. Network and ports
@@ -335,7 +407,13 @@ BCM 2/3, 5/6 and 12/13 belong to the signal generator. The Pi drives these
 lines push-pull and leaves EN driven high after a reset pulse, so put a 1 kΩ
 resistor in series on each line; a DUT's reset key pressed then cannot short
 a Pi output. After `sudo systemctl restart rfc2217-portal` the portal log names
-each slot's pins, and run the BOOT/EN test on each wired slot.
+each slot's pins, and run the BOOT/EN test on each wired slot. Run it with the
+board awake: a native-USB ESP32 shows the EN reset by leaving USB for a moment,
+and the test counts that only right after its pulse.
+
+To check an EN wire by hand, hold it low (`POST /api/gpio/set
+{"pin": <EN>, "value": 0}`): a native-USB board drops out of its slot while
+held, and comes back after `"value": 1`.
 
 Without GPIO the testbench still provides serial and debug for every plugged-in
 device; GPIO only adds automated download-mode entry and flap recovery.
