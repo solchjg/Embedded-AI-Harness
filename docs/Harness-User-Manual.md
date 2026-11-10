@@ -670,7 +670,7 @@ curl -X POST http://$BENCH:8080/api/wifi/mode \
 ```bash
 curl -X POST http://$BENCH:8080/api/wifi/ap_start \
   -H 'Content-Type: application/json' \
-  -d '{"ssid":"TestNetwork","password":"password123","channel":6}'
+  -d '{"ssid":"TestNetwork","pass":"password123","channel":6}'
 
 curl http://$BENCH:8080/api/wifi/ap_status
 curl -X POST http://$BENCH:8080/api/wifi/ap_stop
@@ -1518,7 +1518,7 @@ curl -X POST .../api/serial/monitor -d '{"slot":"SLOT1","pattern":"ready","timeo
 curl -X POST .../api/serial/release -d '{"slot":"SLOT1"}'
 
 # WiFi
-curl -X POST .../api/wifi/ap_start -d '{"ssid":"TestAP","password":"secret"}'
+curl -X POST .../api/wifi/ap_start -d '{"ssid":"TestAP","pass":"secret"}'
 curl .../api/wifi/ap_status
 curl .../api/wifi/scan
 curl -X POST .../api/wifi/ap_stop
