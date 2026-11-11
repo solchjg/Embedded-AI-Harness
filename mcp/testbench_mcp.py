@@ -146,7 +146,7 @@ SPECS = [
     dict(name="wifi_scan", method="GET", path="/api/wifi/scan", desc="Scan for WiFi networks."),
     dict(name="wifi_ap_start", method="POST", path="/api/wifi/ap_start",
          desc="Start a SoftAP (optionally NAT-bridged to the LAN).",
-         props=p(ssid=S_STR, password=S_STR, internet=dict(**S_BOOL, default=False)), required=["ssid"]),
+         props=p(ssid=S_STR, **{"pass": S_STR}, internet=dict(**S_BOOL, default=False)), required=["ssid"]),
     dict(name="wifi_ap_stop", method="POST", path="/api/wifi/ap_stop", desc="Stop the SoftAP."),
     dict(name="wifi_ap_status", method="GET", path="/api/wifi/ap_status", desc="SoftAP state + connected stations."),
     dict(name="wifi_sta_join", method="POST", path="/api/wifi/sta_join", desc="Join a WiFi network as a station.",
