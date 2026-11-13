@@ -411,6 +411,23 @@ each slot's pins, and run the BOOT/EN test on each wired slot. Run it with the
 board awake: a native-USB ESP32 shows the EN reset by leaving USB for a moment,
 and the test counts that only right after its pulse.
 
+Until the portal first drives a pin, BCM 9 – 27 are inputs with the Pi's own
+pull-down (about 50 kΩ), from power-on and through every Pi reboot. A board with
+a weak EN pull-up stays in reset against it, and does whenever a Schottky diode
+(band at the Pi) replaces the 1 kΩ, because the diode passes only the pull. So
+give every wired pair a pull-up from power-on in `/boot/firmware/config.txt`,
+then reboot:
+
+```bash
+echo "gpio=17,18=ip,pu" | sudo tee -a /boot/firmware/config.txt   # pair 1; list each wired pair's pins
+```
+
+`pinctrl get 17,18` should then show `ip pu | hi`; `ip pd | lo` is the
+symptom (`pinctrl set 17,18 ip pu` fixes it until the next reboot). The portal
+still drives the pins low and high for its pulses. With the Pi powered off its
+pins can still pull the line low, so a board that must run then needs its own
+10 kΩ from EN to 3V3.
+
 To check an EN wire by hand, hold it low (`POST /api/gpio/set
 {"pin": <EN>, "value": 0}`): a native-USB board drops out of its slot while
 held, and comes back after `"value": 1`.
