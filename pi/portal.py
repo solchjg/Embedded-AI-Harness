@@ -2654,6 +2654,9 @@ def test_gpio_wiring(slot: dict) -> dict:
         return {"ok": False, "error": f"{label}: no GPIO pins configured"}
 
     result = {"ok": True, "en_wired": False, "boot_wired": False, "detail": ""}
+    # The board's serial as it runs now: the test ends while a native-USB
+    # board may still show its ROM's serial, not its firmware's (FR-042).
+    serial_before = _usb_serial_from_devnode(slot.get("devnode"))
     slot["_gpio_testing"] = True
     try:
         _gpio_wiring_steps(slot, label, gpio_boot, gpio_en, result)
@@ -2673,6 +2676,7 @@ def test_gpio_wiring(slot: dict) -> dict:
         return result
 
     wired = bool(result["en_wired"] and result["boot_wired"])
+    serial_after = _usb_serial_from_devnode(slot.get("devnode"))
     now = time.time()
     # FR-042: name the board and the moment, so the verdict is not shown
     # for a later board or trusted forever.
@@ -2681,7 +2685,8 @@ def test_gpio_wiring(slot: dict) -> dict:
         "boot_wired": result["boot_wired"],
         "gpio_wired": wired,
         "detail": result["detail"],
-        "board_serial": _usb_serial_from_devnode(slot.get("devnode")),
+        "board_serial": serial_before or serial_after,
+        "board_serials": sorted({x for x in (serial_before, serial_after) if x}),
         "checked_ts": now,
         "checked_at": slot_meta.bench_iso(now),
     }

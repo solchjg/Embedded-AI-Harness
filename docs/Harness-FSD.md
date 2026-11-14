@@ -3419,7 +3419,10 @@ left, or vouches for one that has been replaced.
 - The slot card shall show a result only while a board is present, with the
   time it was measured in US Eastern time (EST/EDT).
 - A result whose `board_serial` differs from the board now present is not shown
-  and not trusted (`gpio_wiring: "other_board"`).
+  and not trusted (`gpio_wiring: "other_board"`). A native-USB ESP32 shows its
+  ROM's serial (its MAC) around a reset and its firmware's own once running, so
+  the measurement also lists every serial it saw before and after
+  (`board_serials`), and any of them is the same board.
 - A result older than `GPIO_WIRING_MAX_AGE_H` (default 168 h), or recorded
   without a board and time, is shown muted as out of date (`"stale"`) and is not
   trusted.
@@ -3522,7 +3525,7 @@ wiring, and then never tests BOOT.
 | FR-043 | Detected chip and USB devices (ESP native, CP2102, Notecard, none) · decide | True except for a Notecard with no ESP chip | A bridge board or an unprobed native-USB ESP32 losing the test | host |
 | FR-041 | Names with padding, control characters, empty, null, too long, non-string · clean | Tidied name; empty and null clear; the last two refused | A name over 40 characters stored | host |
 | FR-041 | Set a name on a slot · restart the portal | `board_name` in `/api/devices` and on the card | The name lost on restart | bench |
-| FR-042 | Stored result · board absent, same board, other board, older than the limit, legacy record | Hidden; shown; `other_board`; `stale`; `stale` | A result shown for an empty slot or another board; `gpio_wired` true from a stale result | host |
+| FR-042 | Stored result · board absent, same board, same board by its other USB serial, other board, older than the limit, legacy record | Hidden; shown; shown; `other_board`; `stale`; `stale` | A result shown for an empty slot or another board; `gpio_wired` true from a stale result | host |
 | FR-042 | Measurement time · format | Ends in `EST` or `EDT` per the date | A UTC or naive time on the card | host |
 
 ---

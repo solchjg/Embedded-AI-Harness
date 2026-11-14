@@ -80,6 +80,17 @@ def test_fr042_other_board_not_shown_or_trusted():
     assert v["wired"] is None and not v["show"]
 
 
+def test_fr042_board_known_by_its_other_usb_serial():
+    # A native-USB ESP32 shows the ROM's serial (its MAC) around a reset and its
+    # firmware's own (CircuitPython, TinyUSB) once running: one board, two serials.
+    r = rec(True, serial=MAC)
+    r["board_serials"] = [MAC, "F412FA6F5B44"]
+    v = sm.wiring_verdict(r, True, "F412FA6F5B44", T0 + 60)
+    assert v["status"] == "wired" and v["wired"] is True and v["show"]
+    v = sm.wiring_verdict(r, True, OTHER, T0 + 60)
+    assert v["status"] == "other_board" and v["wired"] is None
+
+
 def test_fr042_old_result_is_stale():
     v = sm.wiring_verdict(rec(True), True, MAC, T0 + 8 * DAY, 7 * DAY)
     assert v["status"] == "stale" and v["wired"] is None and v["show"]
