@@ -108,9 +108,11 @@ def wiring_verdict(record: dict | None, present: bool,
     ts = record.get("checked_ts")
     out["checked_at"] = bench_time(ts) if ts is not None else record.get("checked_at")
 
-    recorded_serial = record.get("board_serial")
-    if (board_serial and recorded_serial
-            and board_serial != recorded_serial):
+    # A native-USB ESP32 shows two serials: the ROM's (its MAC) around a reset
+    # and its firmware's own once running. The test records every one it saw.
+    known = {s for s in [record.get("board_serial"),
+                         *(record.get("board_serials") or [])] if s}
+    if board_serial and known and board_serial not in known:
         out["status"] = "other_board"
         return out
 
